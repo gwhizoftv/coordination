@@ -1,0 +1,56 @@
+{
+  "actionId": "0aca2d23-237c-42f1-9767-04704e45d232",
+  "agent": "cursor",
+  "artifact": "plan-ballot",
+  "choice": "codex",
+  "inputSetHash": "713ea12eacac5c401477f2bcb137a1fd4718a5491e6acca8e3a57360f1b5dc5a",
+  "issue": 177,
+  "issueSessionId": "issue-177:8d38734a93bc374560d2728e8cff6f9636181585",
+  "plans": [
+    {
+      "agent": "antigravity",
+      "commitSha": "a8d047341f304dcb068a2a803f66a48b8089d37f",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "claude",
+      "commitSha": "0f30e5ec0b55ee7c62b49bbefec13fe91d2510d2",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "codex",
+      "commitSha": "29ff9141bb350e934d8e72cd1a145303db4cd344",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "cursor",
+      "commitSha": "6b9d1ef94dfa29410a7b919c27a6534283bb105c",
+      "path": ".plans/issue-177/plan.md"
+    }
+  ],
+  "protocolVersion": 2,
+  "rationale": "Codex files the follow-up only after the ballot batch is published, verifies that the issue exists and links the parent, recovers a parked revision-limit question, and keeps a late drop from rewinding earlier selections, whereas Claude discloses the vote during private balloting, Antigravity omits the state and evidence files its new step requires, and Cursor neither binds the revision pin nor stops that earlier drop reset.",
+  "responseSha256": "58c09cd96dd1b0b27fc5bde2bf331e7bc0d28bfd328faf1657d61253275c0f4f",
+  "reviews": [
+    {
+      "agent": "antigravity",
+      "commitSha": "cca85ff5a5c3e38331d69d6f44875dbeb66c6128",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "claude",
+      "commitSha": "e0b261f1dda8b94824f08fe34e30e080d41ea8a3",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "codex",
+      "commitSha": "d3cf8c579ae9973a0036b565f9e09810758b538f",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "cursor",
+      "commitSha": "0ef1ea1e414e79bdd2a7bf7afa96c4166074e4bd",
+      "path": ".plans/issue-177/review.md"
+    }
+  ]
+}

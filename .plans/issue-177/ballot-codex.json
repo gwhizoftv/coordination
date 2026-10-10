@@ -1,0 +1,56 @@
+{
+  "actionId": "27b0cbcc-2ea5-4f64-97a1-6bdc0b4732c1",
+  "agent": "codex",
+  "artifact": "plan-ballot",
+  "choice": "codex",
+  "inputSetHash": "713ea12eacac5c401477f2bcb137a1fd4718a5491e6acca8e3a57360f1b5dc5a",
+  "issue": 177,
+  "issueSessionId": "issue-177:8d38734a93bc374560d2728e8cff6f9636181585",
+  "plans": [
+    {
+      "agent": "antigravity",
+      "commitSha": "a8d047341f304dcb068a2a803f66a48b8089d37f",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "claude",
+      "commitSha": "0f30e5ec0b55ee7c62b49bbefec13fe91d2510d2",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "codex",
+      "commitSha": "29ff9141bb350e934d8e72cd1a145303db4cd344",
+      "path": ".plans/issue-177/plan.md"
+    },
+    {
+      "agent": "cursor",
+      "commitSha": "6b9d1ef94dfa29410a7b919c27a6534283bb105c",
+      "path": ".plans/issue-177/plan.md"
+    }
+  ],
+  "protocolVersion": 2,
+  "rationale": "Codex provides the most complete implementable plan for post-publication objector filing, verified and replay-safe follow-up evidence, exact-pin finalization, legacy limit-question recovery, and late-drop preservation, with all required modules listed and focused tests using existing fixtures.",
+  "responseSha256": "ade6e6ac1a7fd964d9ffb4fae6311c28f24facfad20fe62395cc21546bc3f608",
+  "reviews": [
+    {
+      "agent": "antigravity",
+      "commitSha": "cca85ff5a5c3e38331d69d6f44875dbeb66c6128",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "claude",
+      "commitSha": "e0b261f1dda8b94824f08fe34e30e080d41ea8a3",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "codex",
+      "commitSha": "d3cf8c579ae9973a0036b565f9e09810758b538f",
+      "path": ".plans/issue-177/review.md"
+    },
+    {
+      "agent": "cursor",
+      "commitSha": "0ef1ea1e414e79bdd2a7bf7afa96c4166074e4bd",
+      "path": ".plans/issue-177/review.md"
+    }
+  ]
+}
