@@ -177,6 +177,46 @@ describe("orderScaffold", () => {
     });
   });
 
+  it("fills the follow-up receipt and a replay-safe filing key", () => {
+    const revision = "c".repeat(40);
+    const actionId = "10000000-0000-4000-8000-000000000004";
+    const ctx = {
+      stepId: "R6.follow-up" as const,
+      issue: 177,
+      issueSessionId: "issue-177:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      agent: "codex",
+      actionId,
+      baselineSha: "a".repeat(40),
+      automationDigest: "b".repeat(64),
+      inputs: [{ kind: "revision", agent: "cursor", commitSha: revision, path: ".signals/issue-177/revision-ready-cursor-round-3.json" }],
+      eligibleChoices: [],
+      round: 3,
+      approvedPaths: [],
+      filing: {
+        repository: "acme/app",
+        concludingIssueUrl: "https://github.com/acme/app/issues/177",
+        concludingIssueNumber: 177,
+        revisionSha: revision,
+        filingKey: `coord-follow-up:issue-177:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:codex:${revision}`
+      }
+    };
+    const value = artifactScaffoldValue(ctx);
+    expect(value).toMatchObject({
+      artifact: "follow-up-ready",
+      actionId,
+      round: 3,
+      revisionCommitSha: revision,
+      followUpIssueUrl: "<https://github.com/owner/repo/issues/N>"
+    });
+    const rendered = renderArtifactScaffold(ctx);
+    expect(rendered).toContain("already published");
+    expect(rendered).toContain("gh issue list --repo acme/app --state all");
+    expect(rendered).toContain("--body-file objections.md");
+    expect(rendered).toContain(ctx.filing.filingKey);
+    expect(rendered).not.toContain(`coord-follow-up:${actionId}`);
+    expect(rendered).toContain("https://github.com/acme/app/issues/177");
+  });
+
   it("limits build discipline to planning, implementation, and revision tasks", () => {
     expect(
       Object.values(STEP_DEFINITIONS)

@@ -144,11 +144,33 @@ const rederiveAfterDrop = (
   };
 
   let reset = false;
-  if (priorPlan !== null) {
+  if (priorConsensus?.algorithm === "revision-limit-active-roster-v1") {
+    const retained = cursorsStateSchema.parse({
+      ...next,
+      derived: {
+        planSelection: priorPlan === null ? null : { ...priorPlan, activeRoster: [...next.activeRoster] },
+        implementationSelection:
+          priorImplementation === null ? null : { ...priorImplementation, activeRoster: [...next.activeRoster] },
+        consensus: null
+      }
+    });
+    const rebuilt = computeConsensusDerived(retained, priorConsensus.round, now, priorConsensus.decisionId);
+    next = cursorsStateSchema.parse({
+      ...retained,
+      derived: {
+        ...retained.derived,
+        consensus:
+          rebuilt !== null && rebuilt.consensusPin === priorConsensus.consensusPin
+            ? persistDecision(rebuilt)
+            : priorConsensus
+      },
+      updatedAt: now
+    });
+  } else if (priorPlan !== null) {
     if (next.activeRoster.length === 1) {
       if (priorPlan.selectedAgents[0] !== next.activeRoster[0]) {
         next = resetTo(next, "R4.implement", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
@@ -156,7 +178,7 @@ const rederiveAfterDrop = (
       const plan = computePlanSelectionDerived(next, now, priorPlan.decisionId);
       if (plan === null) {
         next = resetTo(next, "R3.plan-ballot", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       } else {
@@ -167,7 +189,7 @@ const rederiveAfterDrop = (
         });
         if (plan.selectedAgents[0] !== priorPlan.selectedAgents[0]) {
           next = resetTo(next, "R4.implement", null, (step) =>
-            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
           );
           reset = true;
         }
@@ -175,11 +197,16 @@ const rederiveAfterDrop = (
     }
   }
 
-  if (!reset && priorImplementation !== null && next.activeRoster.length > 1) {
+  if (
+    priorConsensus?.algorithm !== "revision-limit-active-roster-v1" &&
+    !reset &&
+    priorImplementation !== null &&
+    next.activeRoster.length > 1
+  ) {
     const implementation = computeImplementationSelectionDerived(next, now, priorImplementation.decisionId);
     if (implementation === null) {
       next = resetTo(next, "R5.compare-ballot", null, (step) =>
-        ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+        ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
       );
       reset = true;
     } else {
@@ -193,17 +220,22 @@ const rederiveAfterDrop = (
         implementation.implementationPin !== priorImplementation.implementationPin
       ) {
         next = resetTo(next, "R6.revise", 1, (step) =>
-          ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
     }
   }
 
-  if (!reset && priorConsensus !== null && next.activeRoster.length > 1) {
+  if (
+    priorConsensus?.algorithm !== "revision-limit-active-roster-v1" &&
+    !reset &&
+    priorConsensus !== null &&
+    next.activeRoster.length > 1
+  ) {
     const consensus = computeConsensusDerived(next, priorConsensus.round, now, priorConsensus.decisionId);
     if (consensus === null) {
-      next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R7.finalize");
+      next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R7.finalize" || step === "R6.follow-up");
       reset = true;
     } else {
       next = cursorsStateSchema.parse({
@@ -212,7 +244,7 @@ const rederiveAfterDrop = (
         updatedAt: now
       });
       if (consensus.consensusPin !== priorConsensus.consensusPin) {
-        next = resetTo(next, "R7.finalize", null, (step) => step === "R7.finalize");
+        next = resetTo(next, "R7.finalize", null, (step) => step === "R7.finalize" || step === "R6.follow-up");
         reset = true;
       }
     }
@@ -261,6 +293,12 @@ export const applyOwnerAnswer = (
         const question = current.ownerQuestion;
         if (current.holds.length > 0 && answer !== "abandon") throw new Error("Release active holds explicitly before advancing an owner question.");
         if (question === null || question.id !== questionId) throw new Error(`Owner question ${questionId} is stale or unknown.`);
+        if (
+          current.derived.consensus?.algorithm === "revision-limit-active-roster-v1" &&
+          question.round >= readStartState(paths).maxRevisionRounds
+        ) {
+          throw new Error(`Owner question ${questionId} is stale or unknown.`);
+        }
         if (!question.allowedAnswers.includes(answer)) {
           throw new Error(`Answer ${answer} is not allowed for owner question ${questionId}.`);
         }

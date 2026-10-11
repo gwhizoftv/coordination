@@ -27,6 +27,7 @@ const globalOrder: readonly WorkflowStepId[] = [
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ];
 
@@ -38,6 +39,7 @@ const normalizeCurrentStep = (
   current: WorkflowStepId,
   profile: WorkflowProfile
 ): WorkflowStepId | null => {
+  if (current === "R6.follow-up") return current;
   const sequence = stepsForProfile(profile);
   if (sequence.includes(current)) return current;
   const currentRank = globalOrder.indexOf(current);
@@ -159,7 +161,9 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
         ...(observation.disposition === undefined ? {} : { disposition: observation.disposition }),
         ...(observation.approvedPaths === undefined ? {} : { approvedPaths: observation.approvedPaths }),
         ...(observation.choice === undefined ? {} : { choice: observation.choice }),
-        ...(observation.checkResults === undefined ? {} : { checkResults: observation.checkResults })
+        ...(observation.checkResults === undefined ? {} : { checkResults: observation.checkResults }),
+        ...(observation.followUpIssueUrl === undefined ? {} : { followUpIssueUrl: observation.followUpIssueUrl }),
+        ...(observation.followUpIssueNumber === undefined ? {} : { followUpIssueNumber: observation.followUpIssueNumber })
       });
     }
   }
@@ -188,15 +192,24 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
       .map((agent) => ({ type: "prepare-action", agent, stepId: "R4.amend-ballot", round }));
   }
   if (cursors.ownerQuestion !== null) {
-    return [
-      {
-        type: "owner-action-required",
-        reason: `${cursors.ownerQuestion.kind} at revision round ${cursors.ownerQuestion.round}`,
-        kind: cursors.ownerQuestion.kind,
-        round: cursors.ownerQuestion.round,
-        allowedAnswers: cursors.ownerQuestion.allowedAnswers
-      }
-    ];
+    const question = cursors.ownerQuestion;
+    const terminal =
+      question.round >= start.maxRevisionRounds &&
+      (question.kind === "revision-limit" || question.kind === "ballot-escalation");
+    if (terminal && hasPublishedBatch(cursors, "R6.ballot", question.round)) {
+      return [{ type: "retire-terminal-question" }];
+    }
+    if (!terminal) {
+      return [
+        {
+          type: "owner-action-required",
+          reason: `${question.kind} at revision round ${question.round}`,
+          kind: question.kind,
+          round: question.round,
+          allowedAnswers: question.allowedAnswers
+        }
+      ];
+    }
   }
 
   const profile = effectiveProfile(start, cursors);
@@ -228,6 +241,26 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
   }
   if (current === "R7.finalize" && profile === "reviewed" && needsPlanSelectionDerive(cursors, profile)) {
     return [{ type: "wait", reason: "canonical plan selection is missing or stale" }];
+  }
+
+  if (current === "R6.follow-up") {
+    const round = roundForStep(current, cursors.issueCursor.round);
+    const objectors = cursors.activeRoster.filter((agent) => {
+      const ballot = cursors.acceptedResponses.find(
+        (response) => response.stepId === "R6.ballot" && response.agent === agent && response.round === round
+      );
+      return ballot?.disposition === "revise" || ballot?.disposition === "escalate";
+    });
+    const pending = objectors.filter((agent) => !hasAccepted(cursors, current, agent, round));
+    if (pending.length === 0) {
+      return [{ type: "advance-step", from: current, to: "R7.finalize", round: null }];
+    }
+    const prepare = pending.filter((agent) => {
+      const cursor = cursors.agents[agent];
+      return cursor !== undefined && cursor.status !== "dropped" && (cursor.actionId === null || cursor.stepId !== current);
+    });
+    if (prepare.length === 0) return [{ type: "wait", reason: "waiting for follow-up issues" }];
+    return prepare.map((agent) => ({ type: "prepare-action", agent, stepId: current, round }));
   }
 
   const designated =
@@ -264,39 +297,39 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
     }
 
     if (current === "R6.ballot") {
+      const currentRound = round ?? 1;
       const ballots = cursors.acceptedResponses.filter(
         (response) => response.stepId === current && response.round === round && participants.includes(response.agent)
       );
-      if (ballots.some((ballot) => ballot.disposition === "escalate")) {
-        const currentRound = round ?? 1;
-        return [
-          {
-            type: "owner-action-required",
-            reason: `consensus ballot round ${currentRound} requested escalation`,
-            kind: "ballot-escalation",
-            round: currentRound,
-            allowedAnswers:
-              currentRound < start.maxRevisionRounds ? ["retry", "revise", "abandon"] : ["retry", "abandon"]
-          }
-        ];
-      }
-      if (ballots.some((ballot) => ballot.disposition === "revise")) {
-        if ((round ?? 1) >= start.maxRevisionRounds) {
+      const objected = ballots.some((ballot) => ballot.disposition === "revise" || ballot.disposition === "escalate");
+      if (objected && currentRound < start.maxRevisionRounds) {
+        if (ballots.some((ballot) => ballot.disposition === "escalate")) {
           return [
             {
               type: "owner-action-required",
-              reason: `revision limit ${start.maxRevisionRounds} reached; round ${start.maxRevisionRounds + 1} is forbidden`,
-              kind: "revision-limit",
-              round: start.maxRevisionRounds,
-              allowedAnswers: ["retry", "abandon"]
+              reason: `consensus ballot round ${currentRound} requested escalation`,
+              kind: "ballot-escalation",
+              round: currentRound,
+              allowedAnswers: ["retry", "revise", "abandon"]
             }
           ];
         }
-        return [{ type: "advance-step", from: current, to: "R6.revise", round: (round ?? 1) + 1 }];
+        return [{ type: "advance-step", from: current, to: "R6.revise", round: currentRound + 1 }];
       }
-      if (needsConsensusDerive(cursors, round ?? 1)) {
-        return [{ type: "derive-consensus", round: round ?? 1 }];
+      if (objected) {
+        const consensus = cursors.derived.consensus;
+        const ready =
+          consensus !== null &&
+          consensus.round === currentRound &&
+          consensus.algorithm === "revision-limit-active-roster-v1" &&
+          sameRoster(consensus.activeRoster, cursors.activeRoster);
+        if (!ready) return [{ type: "derive-revision-limit", round: currentRound }];
+        return [{ type: "advance-step", from: current, to: "R6.follow-up", round: currentRound }];
       }
+      if (needsConsensusDerive(cursors, currentRound)) {
+        return [{ type: "derive-consensus", round: currentRound }];
+      }
+      return [{ type: "advance-step", from: current, to: "R7.finalize", round: null }];
     }
 
     if (current === "R3.plan-ballot" && needsPlanSelectionDerive(cursors, profile)) {

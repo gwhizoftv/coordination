@@ -180,6 +180,18 @@ export const consensusBallotArtifactSchema = z
   })
   .strict();
 
+export const followUpReadyArtifactSchema = z
+  .object({
+    ...commonArtifactFields,
+    artifact: z.literal("follow-up-ready"),
+    actionId: actionIdSchema,
+    inputSetHash: digestSchema,
+    round: z.literal(3),
+    revisionCommitSha: gitShaSchema,
+    followUpIssueUrl: z.string().url()
+  })
+  .strict();
+
 export const finalizationArtifactSchema = z
   .object({
     ...commonArtifactFields,
@@ -204,6 +216,7 @@ export const publishedArtifactSchema = z.discriminatedUnion("artifact", [
   comparisonBallotArtifactSchema,
   revisionReadyArtifactSchema,
   consensusBallotArtifactSchema,
+  followUpReadyArtifactSchema,
   finalizationArtifactSchema,
   planAmendmentRequestSchema,
   amendmentBallotArtifactSchema

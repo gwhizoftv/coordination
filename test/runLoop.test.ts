@@ -8,6 +8,7 @@ import { computeInputSetHash } from "../src/evidence.js";
 import { writeCloneAgentsProtocol } from "../src/agentsProtocol.js";
 import { git, repoRoot } from "./support/workspaceFixture.js";
 import { decideLifecycleNudge, initialAgentLifecycle, observeAgentLifecycle, readAgentLifecycle } from "../src/agentLifecycle.js";
+import { applyOwnerAnswer, dropOwnerAgent } from "../src/ownerControls.js";
 import { BareMirror } from "../src/mirror.js";
 import { agentResponsePath, agentRuntimePaths, createIssueRuntime, issueRuntimePaths } from "../src/paths.js";
 import {
@@ -17,6 +18,7 @@ import {
 } from "../src/materializedInputs.js";
 import {
   buildOrder,
+  computeConsensusDerived,
   computeDerivedInputSetHash,
   computePlanSelectionDerived,
   CoordinatorRunLoop,
@@ -3894,5 +3896,301 @@ describe("coordinator-resolved change scope", () => {
     const order = buildOrder(paths, start, readCursorsState(paths), "claude", "R2.plan", null);
     expect(order.contextPaths).toEqual(["docs/repo-map.md"]);
     expect(order.changeScope).toEqual([]);
+  });
+});
+
+describe("third-revision closeout", () => {
+  const pin = "f".repeat(40);
+  const seedRound = (
+    paths: ReturnType<typeof fixture>["paths"],
+    disposition: "revise" | "escalate" | "approve" = "revise"
+  ) => {
+    const now = "2026-08-11T18:00:00.000Z";
+    const current = readCursorsState(paths);
+    const roster = [...current.activeRoster];
+    const state = cursorsStateSchema.parse({
+      ...current,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      derived: {
+        ...current.derived,
+        implementationSelection: {
+          kind: "implementation-selection",
+          algorithm: "plurality-active-roster-v1",
+          inputSetHash: "b".repeat(64),
+          activeRoster: roster,
+          inputs: [
+            {
+              kind: "implementation",
+              agent: "codex",
+              submissionSha: "d".repeat(40),
+              path: ".signals/issue-1/implementation-ready-codex.json",
+              productPin: "e".repeat(40)
+            }
+          ],
+          decisionId: `implementation-selection:${"b".repeat(64)}`,
+          supersedes: null,
+          decidedAt: now,
+          winner: "codex",
+          implementationPin: "e".repeat(40),
+          reviser: "codex"
+        }
+      },
+      accepted: [
+        {
+          stepId: "R6.revise",
+          agent: "codex",
+          round: 3,
+          submissionSha: "c".repeat(40),
+          productPin: pin,
+          path: ".signals/issue-1/revision-ready-codex-round-3.json",
+          acceptedAt: now
+        }
+      ],
+      acceptedResponses: roster.map((agent) =>
+        acceptedResponseFixture({
+          stepId: "R6.ballot",
+          agent,
+          round: 3,
+          disposition: agent === "claude" && disposition !== "approve" ? disposition : "approve",
+          acceptedAt: now
+        })
+      ),
+      ballotBatches: [
+        publishedBallotBatchFixture({
+          kind: "consensus-ballot-batch",
+          activeRoster: roster,
+          round: 3,
+          commitSha: "9".repeat(40),
+          createdAt: now
+        })
+      ],
+      evidence: { branch: "issue-1/coordinator-evidence", tip: "9".repeat(40) },
+      updatedAt: now
+    });
+    writeCursorsState(paths, state);
+    return { now, roster };
+  };
+
+  it("binds the capped decision to the revision and keeps it distinct from unanimous approval", () => {
+    const { paths } = fixture();
+    const { now } = seedRound(paths, "revise");
+    const capped = computeConsensusDerived(readCursorsState(paths), 3, now);
+    expect(capped?.algorithm).toBe("revision-limit-active-roster-v1");
+    expect(capped?.consensusPin).toBe(pin);
+    expect(capped && "objectors" in capped ? capped.objectors : []).toEqual(["claude"]);
+    const { paths: approvedPaths } = fixture();
+    const approved = seedRound(approvedPaths, "approve");
+    const unanimous = computeConsensusDerived(readCursorsState(approvedPaths), 3, approved.now);
+    expect(unanimous?.algorithm).toBe("unanimous-active-roster-v1");
+    expect(unanimous?.inputSetHash).not.toBe(capped?.inputSetHash);
+  });
+
+  it("recovers a journaled cap decision without dropping a filing receipt", async () => {
+    const { paths } = fixture();
+    const { now } = seedRound(paths, "escalate");
+    const record = computeConsensusDerived(readCursorsState(paths), 3, now);
+    expect(record).not.toBeNull();
+    const receipt = {
+      stepId: "R6.follow-up" as const,
+      agent: "claude",
+      round: 3,
+      submissionSha: "a".repeat(40),
+      path: ".signals/issue-1/follow-up-ready-claude-round-3.json",
+      acceptedAt: now,
+      followUpIssueUrl: "https://github.com/example/project/issues/50",
+      followUpIssueNumber: 50
+    };
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({ ...readCursorsState(paths), accepted: [...readCursorsState(paths).accepted, receipt] })
+    );
+    appendJournal(paths, { type: "decision-derived", details: derivedDecisionJournalDetails(record!) }, now);
+    const after = await new CoordinatorRunLoop(paths, { tmux: null, now: () => now }).runTick();
+    expect(after.issueCursor.stepId).toBe("R7.finalize");
+    expect(after.derived.consensus?.consensusPin).toBe(pin);
+    expect(after.accepted).toContainEqual(expect.objectContaining({ stepId: "R6.follow-up", agent: "claude" }));
+    expect(readJournal(paths).filter((event) => event.type === "decision-derived")).toHaveLength(1);
+  });
+
+  it("closes a legacy cap question without discarding votes, pauses, or holds", async () => {
+    const { paths } = fixture();
+    const { now } = seedRound(paths);
+    const votes = readCursorsState(paths).acceptedResponses;
+    const questionId = "10000000-0000-4000-8000-000000000009";
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...readCursorsState(paths),
+        paused: false,
+        manualPaused: true,
+        holds: [
+          {
+            id: "10000000-0000-4000-8000-000000000008",
+            agent: "claude",
+            actionId: actionIdFor("claude"),
+            sessionId: null,
+            reason: "harness-gone",
+            evidenceId: "budget",
+            observedAt: now,
+            resetsAt: null,
+            confidence: "unknown",
+            retryOwner: "owner",
+            evidence: null
+          }
+        ],
+        ownerQuestion: {
+          id: questionId,
+          kind: "revision-limit",
+          round: 3,
+          allowedAnswers: ["retry", "abandon"],
+          createdAt: now
+        }
+      })
+    );
+    const after = await new CoordinatorRunLoop(paths, { tmux: null, now: () => now }).runTick();
+    expect(after.ownerQuestion).toBeNull();
+    expect(after.acceptedResponses).toEqual(votes);
+    expect(after.manualPaused).toBe(true);
+    expect(after.holds).toHaveLength(1);
+    expect(after.lastOwnerAnswer).toBeNull();
+    expect(after.issueCursor.stepId).toBe("R6.follow-up");
+  });
+
+  it("keeps the final pin when a non-reviser drop leaves one agent", () => {
+    const { paths } = fixture();
+    const { now } = seedRound(paths);
+    const record = computeConsensusDerived(readCursorsState(paths), 3, now);
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...readCursorsState(paths),
+        issueCursor: { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 },
+        derived: { ...readCursorsState(paths).derived, consensus: record }
+      })
+    );
+    const after = dropOwnerAgent(paths, "claude", now);
+    expect(after.activeRoster).toEqual(["codex"]);
+    expect(after.derived.consensus?.consensusPin).toBe(pin);
+    expect(after.derived.implementationSelection?.implementationPin).toBe("e".repeat(40));
+    expect(after.issueCursor.stepId).not.toBe("R4.implement");
+    expect(after.issueCursor.stepId).not.toBe("R3.plan-ballot");
+    expect(after.accepted.some((submission) => submission.stepId === "R6.revise" && submission.productPin === pin)).toBe(true);
+  });
+
+  it("rejects a late answer once the cap decision is stored", () => {
+    const { paths } = fixture();
+    const { now } = seedRound(paths);
+    const record = computeConsensusDerived(readCursorsState(paths), 3, now);
+    const questionId = "10000000-0000-4000-8000-000000000007";
+    const votes = readCursorsState(paths).acceptedResponses;
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...readCursorsState(paths),
+        derived: { ...readCursorsState(paths).derived, consensus: record },
+        ownerQuestion: {
+          id: questionId,
+          kind: "ballot-escalation",
+          round: 3,
+          allowedAnswers: ["retry", "abandon"],
+          createdAt: now
+        }
+      })
+    );
+    expect(() => applyOwnerAnswer(paths, questionId, "retry", now)).toThrow(/stale or unknown/);
+    expect(readCursorsState(paths).acceptedResponses).toEqual(votes);
+    expect(readCursorsState(paths).derived.consensus?.consensusPin).toBe(pin);
+  });
+
+  it("opens one pull request for the capped pin and reuses an existing pull request", async () => {
+    const { paths } = fixture({ prPolicy: "owner-only", origin: "https://github.com/example/project.git" });
+    seedPendingPublication(paths, pin);
+    const current = readCursorsState(paths);
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...current,
+        derived: {
+          ...current.derived,
+          consensus: {
+            kind: "consensus",
+            algorithm: "revision-limit-active-roster-v1",
+            inputSetHash: "d".repeat(64),
+            activeRoster: current.activeRoster,
+            inputs: [
+              {
+                kind: "revision",
+                agent: "codex",
+                submissionSha: "c".repeat(40),
+                path: ".signals/issue-1/revision-ready-codex-round-3.json",
+                productPin: pin
+              }
+            ],
+            decisionId: `consensus:${"d".repeat(64)}:r3`,
+            supersedes: null,
+            decidedAt: "2026-08-11T17:00:00.000Z",
+            round: 3,
+            consensusPin: pin,
+            objectors: ["claude"]
+          }
+        },
+        accepted: [
+          ...current.accepted,
+          {
+            stepId: "R6.follow-up",
+            agent: "claude",
+            round: 3,
+            submissionSha: "a".repeat(40),
+            path: ".signals/issue-1/follow-up-ready-claude-round-3.json",
+            acceptedAt: "2026-08-11T17:00:00.000Z",
+            followUpIssueUrl: "https://github.com/example/project/issues/50",
+            followUpIssueNumber: 50
+          }
+        ]
+      })
+    );
+    const mirror = new BareMirror(paths.mirror, "https://github.com/example/project.git", async () => ({
+      exitCode: 0,
+      stdout: Buffer.alloc(0),
+      stderr: ""
+    }));
+    const opened: string[] = [];
+    const gh: string[][] = [];
+    const first = await new CoordinatorRunLoop(paths, {
+      tmux: null,
+      mirror,
+      processRunner: async (argv) => {
+        gh.push([...argv]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      pullRequestOpener: async (input) => {
+        opened.push(input.body);
+        return { url: "https://github.com/example/project/pull/9" };
+      }
+    }).runTick();
+    expect(first.publication.url).toBe("https://github.com/example/project/pull/9");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toContain("Closes #1");
+    expect(opened[0]).toContain("Concluded at the revision limit.");
+    expect(opened[0]).toContain("https://github.com/example/project/issues/50");
+    expect(gh.some((argv) => argv.includes("create"))).toBe(false);
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...readCursorsState(paths),
+        completed: false,
+        publication: { ...readCursorsState(paths).publication, status: "failed", error: "retry me" }
+      })
+    );
+    const second = await new CoordinatorRunLoop(paths, {
+      tmux: null,
+      mirror,
+      pullRequestOpener: async () => {
+        opened.push("second");
+        return { url: "https://github.com/example/project/pull/10" };
+      }
+    }).runTick();
+    expect(opened).toHaveLength(1);
+    expect(second.publication).toMatchObject({ status: "completed", url: "https://github.com/example/project/pull/9" });
   });
 });

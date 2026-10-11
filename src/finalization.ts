@@ -34,7 +34,7 @@ export type VerifyFinalizationParams = {
   /** Any path inside the Git worktree/object database containing both commits. */
   root: string;
   issue: number;
-  /** Exact implementation commit approved by consensus. */
+  /** Authorized finalization base: a unanimous pin, or the capped third-revision pin. */
   consensusSha: string;
   /** Proposed merge-ready PR head. */
   finalSha: string;

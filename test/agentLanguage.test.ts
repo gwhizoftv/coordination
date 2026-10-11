@@ -328,17 +328,25 @@ describe("agent-facing language", () => {
   });
 
   it("covers every workflow step and every evidence id", () => {
-    expect(everyStep).toHaveLength(11);
+    expect(everyStep).toHaveLength(12);
     const subjects = new Set<string>();
     for (const stepId of everyStep) {
       const subject = agentFacingSubject(STEP_DEFINITIONS[stepId].evidenceId);
       expect(subject, stepId).toBeTruthy();
       subjects.add(subject);
     }
-    expect(subjects.size).toBe(11);
+    expect(subjects.size).toBe(12);
     for (const subject of agentFacingSubjects()) {
       expect(findAgentLanguageViolations(subject), subject).toEqual([]);
     }
+  });
+
+  it("renders the follow-up task without internal vocabulary", () => {
+    const body = renderEveryStep(fixture()).get("R6.follow-up");
+    expect(body).toContain("already published");
+    expect(body).toContain("gh issue list");
+    expect(body).toContain("--body-file");
+    expect(findAgentLanguageViolations(body ?? "")).toEqual([]);
   });
 
   it("keeps internal vocabulary out of the injected text", () => {

@@ -14,6 +14,14 @@ export type ArtifactScaffoldContext = {
   approvedPaths: readonly string[];
   actionId?: string;
   scopeHash?: string;
+  conclusion?: "unanimous-active-roster-v1" | "revision-limit-active-roster-v1";
+  filing?: {
+    repository: string | null;
+    concludingIssueUrl: string;
+    concludingIssueNumber: number;
+    revisionSha: string;
+    filingKey: string;
+  };
 };
 
 const PLACEHOLDER_SHA = "<40-lowercase-hex-commit-sha>";
@@ -72,6 +80,17 @@ export const artifactScaffoldValue = (ctx: ArtifactScaffoldContext): Record<stri
         ...(ctx.scopeHash === undefined ? {} : { scopeHash: ctx.scopeHash }),
         basedOn: ctx.inputs.map((input) => input.commitSha)
       };
+    case "R6.follow-up": {
+      const revision = ctx.inputs.find((input) => input.kind === "revision")?.commitSha ?? ctx.filing?.revisionSha ?? PLACEHOLDER_SHA;
+      return {
+        ...withHash(ctx),
+        artifact: "follow-up-ready",
+        actionId: ctx.actionId ?? "<action-uuid>",
+        round: 3,
+        revisionCommitSha: revision,
+        followUpIssueUrl: "<https://github.com/owner/repo/issues/N>"
+      };
+    }
     case "R4.amend-ballot":
     case "R6.ballot":
       return {
@@ -152,6 +171,45 @@ const markdownHeadingScaffold = (ctx: ArtifactScaffoldContext): string => {
   }
 };
 
+const followUpFilingNote = (ctx: ArtifactScaffoldContext): string => {
+  if (ctx.stepId !== "R6.follow-up") return "";
+  const filing = ctx.filing;
+  const repository = filing?.repository ?? null;
+  const revision = filing?.revisionSha || "(bound final revision)";
+  const key = filing?.filingKey || "(filing key once the final revision is bound)";
+  const issueNumber = filing?.concludingIssueNumber ?? ctx.issue;
+  const issueUrl = filing?.concludingIssueUrl || "(concluding issue URL)";
+  const repo = repository ?? "<owner/repo>";
+  const search = `gh issue list --repo ${repo} --state all --search ${JSON.stringify(key)}`;
+  const create = `gh issue create --repo ${repo} --title "<descriptive title>" --body-file objections.md`;
+  return (
+    "\n\nCreate one GitHub issue in the repository below. The review ballots are already published; do not file before they are public. " +
+    "Search every issue state for the filing key and reuse a match, including after a retry. " +
+    "If creation is uncertain, search again before creating another issue. " +
+    "Write the body to a file and pass that file to gh issue create so multiline content stays intact. " +
+    `The body must include the remaining objections, the expected behavior, revision ${revision}, filing key ${key}, ` +
+    `and a backlink to ${issueUrl} or #${issueNumber}. Do not use Closes, Fixes, or Resolves with that issue.\n\n` +
+    `Repository: ${repository ?? "(not a GitHub repository; report that instead of creating an issue)"}\n` +
+    `Concluding issue: #${issueNumber}\n` +
+    `Concluding issue URL: ${issueUrl}\n` +
+    `Revision: ${revision}\n` +
+    `Filing key: ${key}\n` +
+    `Search: ${search}\n` +
+    `Create: ${create}`
+  );
+};
+
+const conclusionNote = (ctx: ArtifactScaffoldContext): string => {
+  if (ctx.stepId !== "R7.finalize" || ctx.conclusion === undefined) return "";
+  if (ctx.conclusion === "revision-limit-active-roster-v1") {
+    return (
+      "\n\nThis finalization base is the third-revision pin recorded by revision-limit-active-roster-v1. " +
+      "Objections were not approvals. Remove only current-issue coordination files."
+    );
+  }
+  return "\n\nThis finalization base is the pin recorded by unanimous-active-roster-v1.";
+};
+
 export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => {
   const markdown = markdownHeadingScaffold(ctx);
   if (markdown !== "") return markdown;
@@ -173,5 +231,5 @@ export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => 
         scopeHash: ctx.scopeHash, explanation: "<discovered omission>",
         additionalPaths: [{ path: "<exact-product-file-path>", reason: "<why the original plan needs this file>" }] }, null, 2) + "\n```"
     : "";
-  return preamble + "```json\n" + `${json}\n` + "```" + request;
+  return preamble + "```json\n" + `${json}\n` + "```" + request + followUpFilingNote(ctx) + conclusionNote(ctx);
 };

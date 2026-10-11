@@ -732,3 +732,67 @@ Implement it.
     ).toMatchObject({ status: "satisfied", productPin: artifact.revisedBranchHead });
   });
 });
+
+describe("follow-up receipts", () => {
+  const followUpOrder = () =>
+    order({
+      stepId: "R6.follow-up",
+      evidenceId: "follow-up-published",
+      requiredPath: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      round: 3,
+      inputs: [
+        {
+          agent: "codex",
+          commitSha: sha("2"),
+          path: ".signals/issue-1/revision-ready-codex-round-3.json",
+          kind: "revision"
+        }
+      ]
+    });
+  const artifactFor = (action: ReturnType<typeof followUpOrder>, patch: Record<string, unknown> = {}) => ({
+    protocolVersion: 1,
+    issue: action.issue,
+    issueSessionId: action.issueSessionId,
+    agent: action.agent,
+    artifact: "follow-up-ready",
+    actionId: action.actionId,
+    inputSetHash: computeInputSetHash(action.inputs),
+    round: 3,
+    revisionCommitSha: sha("2"),
+    followUpIssueUrl: "https://github.com/acme/app/issues/9",
+    ...patch
+  });
+
+  it("accepts a receipt bound to the final revision", async () => {
+    const action = followUpOrder();
+    const result = await evaluateEvidence(action, sha("e"), mirror(JSON.stringify(artifactFor(action))));
+    expect(result).toMatchObject({
+      status: "satisfied",
+      followUpIssueUrl: "https://github.com/acme/app/issues/9"
+    });
+    expect(result.productPin).toBeUndefined();
+  });
+
+  it.each([
+    ["action", { actionId: "10000000-0000-4000-8000-000000000001" }],
+    ["session", { issueSessionId: "other-session" }],
+    ["round", { round: 2 }],
+    ["pin", { revisionCommitSha: sha("9") }],
+    ["hash", { inputSetHash: "c".repeat(64) }]
+  ] as const)("rejects a follow-up receipt with the wrong %s", async (_label, patch) => {
+    const action = followUpOrder();
+    const result = await evaluateEvidence(action, sha("e"), mirror(JSON.stringify(artifactFor(action, patch))));
+    expect(result.status).toBe("rejected");
+  });
+
+  it("rejects a follow-up receipt that is not on the expected branch", async () => {
+    const action = followUpOrder();
+    const result = await evaluateEvidence(
+      action,
+      sha("e"),
+      mirror(JSON.stringify(artifactFor(action)), { isReachable: async () => false })
+    );
+    expect(result.status).toBe("rejected");
+    expect(result.outstanding.join(" ")).toContain(action.branch);
+  });
+});

@@ -62,6 +62,7 @@ const stepIdSchema = z.enum([
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ]);
 const gateIdSchema = z.enum([
@@ -84,6 +85,7 @@ const evidenceIdSchema = z.enum([
   "comparison-response-accepted",
   "revision-pinned",
   "consensus-response-accepted",
+  "follow-up-published",
   "finalization-verified"
 ]);
 const ballotStepIdSchema = z.enum(["R3.plan-ballot", "R5.compare-ballot", "R6.ballot", "R4.amend-ballot"]);
@@ -582,7 +584,10 @@ export const implementationSelectionDerivedSchema = derivedDecisionBaseSchema
     message: "decision identity must match the implementation-selection input hash"
   });
 
-export const consensusDerivedSchema = derivedDecisionBaseSchema
+const consensusIdentity = (record: { decisionId: string; inputSetHash: string; round: number }): boolean =>
+  record.decisionId === `consensus:${record.inputSetHash}:r${record.round}`;
+
+const unanimousConsensusDerivedSchema = derivedDecisionBaseSchema
   .extend({
     kind: z.literal("consensus"),
     algorithm: z.literal("unanimous-active-roster-v1"),
@@ -592,10 +597,35 @@ export const consensusDerivedSchema = derivedDecisionBaseSchema
     consensusPin: gitShaSchema
   })
   .strict()
-  .refine((record) => record.decisionId === `consensus:${record.inputSetHash}:r${record.round}`, {
+  .refine(consensusIdentity, {
     path: ["decisionId"],
     message: "decision identity must match the consensus input hash and round"
   });
+
+const revisionLimitConsensusDerivedSchema = derivedDecisionBaseSchema
+  .extend({
+    kind: z.literal("consensus"),
+    algorithm: z.literal("revision-limit-active-roster-v1"),
+    decisionId: consensusDecisionIdSchema,
+    supersedes: consensusDecisionIdSchema.nullable(),
+    round: z.literal(3),
+    consensusPin: gitShaSchema,
+    objectors: z.array(agentIdSchema).min(1)
+  })
+  .strict()
+  .refine(consensusIdentity, {
+    path: ["decisionId"],
+    message: "decision identity must match the consensus input hash and round"
+  })
+  .refine((record) => {
+    const positions = record.objectors.map((agent) => record.activeRoster.indexOf(agent));
+    return positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1]!));
+  }, {
+    path: ["objectors"],
+    message: "objectors must be a nonempty ordered subset of the active roster"
+  });
+
+export const consensusDerivedSchema = z.union([unanimousConsensusDerivedSchema, revisionLimitConsensusDerivedSchema]);
 
 export const derivedStateSchema = z
   .object({
@@ -615,6 +645,8 @@ export const acceptedSubmissionSchema = z
     disposition: z.enum(["approve", "revise", "escalate"]).optional(),
     approvedPaths: z.array(z.string().min(1)).optional(),
     choice: agentIdSchema.optional(),
+    followUpIssueUrl: z.string().url().optional(),
+    followUpIssueNumber: z.number().int().positive().optional(),
     checkResults: z
       .array(
         z
@@ -863,6 +895,7 @@ const journalEventTypeSchema = z.enum([
   "gate-advanced",
   "owner-question",
   "owner-answer",
+  "terminal-question-retired",
   "owner-guidance-queued",
   "owner-guidance-bound",
   "agent-dropped",

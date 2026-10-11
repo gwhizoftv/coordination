@@ -89,7 +89,13 @@ Start from `config.example.json`:
 - `branch`: must contain `{issue}` and `{agent}`
 - `profile`: persisted default (`solo`, `reviewed`, or `consensus`) used by
   product-resolved start and `coord N`
-- `maxRevisionRounds`: fixed at 3 or less; no round 4 is possible
+- `maxRevisionRounds`: fixed at 3. Round 3 is the last product revision. A
+  unanimous ballot can finalize earlier. At round 3, `revise` or `escalate`
+  records a revision-limit conclusion, asks each objecting agent to file a
+  follow-up issue, and finalizes that revision. It does not open round 4 or
+  ask the owner to retry the same pin. A restart that already has the
+  published ballot continues that closeout. A restart that is still missing
+  ballots or publication finishes that evidence first.
 - `prPolicy`: `coord-open-unmerged` (default; draft PR, owner merges),
   `coord-merged` (coord merges), or legacy `owner-only` (same as open-unmerged)
 - `digestPaths`: optional additional config-relative, confined source
@@ -631,6 +637,8 @@ exclusive lock plus a monotonic revision, so an in-flight fetch or check cannot
 overwrite a concurrent pause, drop, or abandon. `restart-action` reissues
 pending work without changing a gate. `answer` consumes one typed pending
 question, is idempotent for the same answer, and cannot create round 4.
+A retired third-round question is stale: answering it does not restart review
+or replace the closeout pin.
 `abandon` stops the workflow while retaining its audit state.
 
 ### Foreground interactive controls
@@ -655,7 +663,9 @@ not start a second tick loop. Logs clear and redraw the current edit.
 | `q` | Quit outside an edit, stopping only the foreground runner |
 
 Owner questions appear as numbered menus with only `allowedAnswers`. Select a
-number and press Enter; abandon also requires `y`. The captured question ID is
+number and press Enter; abandon also requires `y`. Earlier escalation, before
+the third revision is complete, still uses this menu. The third-revision
+closeout does not add a prompt or a shell interpreter. The captured question ID is
 validated under the same lock as external `coord answer`, so stale selections
 cannot answer a replacement question. Esc returns to hotkeys; `s` redisplays a
 pending question. Menus likewise capture agent/hold identities and revalidate

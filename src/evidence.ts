@@ -3,6 +3,7 @@ import { sha256 } from "./hash.js";
 import type { FetchResult } from "./mirror.js";
 import {
   finalizationArtifactSchema,
+  followUpReadyArtifactSchema,
   implementationReadyArtifactSchema,
   participationReadyArtifactSchema,
   planAmendmentRequestSchema,
@@ -189,7 +190,7 @@ const satisfied = (
   sha: string,
   extra: Pick<
     EvidenceObservation,
-    "productPin" | "disposition" | "approvedPaths" | "choice" | "checkResults"
+    "productPin" | "disposition" | "approvedPaths" | "choice" | "checkResults" | "followUpIssueUrl" | "followUpIssueNumber"
   > = {}
 ): EvidenceObservation => ({
   agent: order.agent,
@@ -375,6 +376,24 @@ export const evaluateEvidence = async (
     }
     return errors.length === 0
       ? satisfied(order, submissionSha, { productPin: parsed.value.revisedBranchHead })
+      : rejected(order, submissionSha, errors);
+  }
+
+  if (order.evidenceId === "follow-up-published") {
+    const parsed = parseJsonWithSchema(blob, followUpReadyArtifactSchema);
+    if (!parsed.ok) return rejected(order, submissionSha, [`invalid follow-up receipt: ${parsed.error}`]);
+    const revision = order.inputs.find((input) => input.kind === "revision")?.commitSha;
+    const errors = [
+      ...commonErrors(parsed.value, order),
+      ...inputHashErrors(parsed.value.inputSetHash, order)
+    ];
+    if (parsed.value.actionId !== order.actionId) errors.push("follow-up receipt actionId does not match the current action");
+    if (order.round !== 3 || parsed.value.round !== 3) errors.push("follow-up receipt is only accepted for the final revision");
+    if (revision === undefined || parsed.value.revisionCommitSha !== revision) {
+      errors.push("follow-up receipt revisionCommitSha is not the bound final revision");
+    }
+    return errors.length === 0
+      ? satisfied(order, submissionSha, { followUpIssueUrl: parsed.value.followUpIssueUrl })
       : rejected(order, submissionSha, errors);
   }
 

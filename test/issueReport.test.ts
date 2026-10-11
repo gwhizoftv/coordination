@@ -205,6 +205,67 @@ describe("issue report", () => {
     );
   });
 
+  it("reports capped filing progress without pending ballot text", () => {
+    const cursors = complete();
+    cursors.completed = false;
+    cursors.issueCursor = { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 };
+    cursors.activeRoster = ["cursor", "codex"];
+    cursors.droppedAgents = ["claude"];
+    cursors.derived.consensus = {
+      kind: "consensus",
+      algorithm: "revision-limit-active-roster-v1",
+      inputSetHash: "d".repeat(64),
+      activeRoster: ["cursor", "codex"],
+      inputs: [
+        {
+          kind: "revision",
+          agent: "cursor",
+          submissionSha: "c".repeat(40),
+          path: ".signals/issue-1/revision-ready-cursor-round-3.json",
+          productPin: impl
+        }
+      ],
+      decisionId: `consensus:${"d".repeat(64)}:r3`,
+      supersedes: null,
+      decidedAt: cursors.updatedAt,
+      round: 3,
+      consensusPin: impl,
+      objectors: ["codex"]
+    };
+    cursors.accepted.push({
+      stepId: "R6.follow-up",
+      agent: "codex",
+      round: 3,
+      submissionSha: "a".repeat(40),
+      path: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      acceptedAt: cursors.updatedAt,
+      followUpIssueUrl: "https://github.com/example/project/issues/40",
+      followUpIssueNumber: 40
+    });
+    cursors.acceptedResponses = [
+      {
+        stepId: "R6.ballot",
+        agent: "claude",
+        actionId: "10000000-0000-4000-8000-000000000001",
+        round: 3,
+        responseSha256: "e".repeat(64),
+        rationale: "private objection that must stay out of status",
+        path: "/runtime/claude.json",
+        acceptedAt: cursors.updatedAt,
+        disposition: "revise"
+      }
+    ];
+    const text = renderIssueReport(start("coord-open-unmerged"), cursors);
+    expect(text).toContain("filing follow-up issues");
+    expect(text).toContain("Conclusion: revision limit reached at round 3.");
+    expect(text).toContain(`Final revision ${impl}.`);
+    expect(text).toContain("Follow-up issues filed: 1/1.");
+    expect(text).toContain("https://github.com/example/project/issues/40");
+    expect(text).toContain("Dropped objection: claude is dropped, not approved and not filed.");
+    expect(text).not.toContain("private objection");
+    expect(text).not.toContain("disposition");
+  });
+
   it("frames the whole report and quotes recovery paths without changing control vocabulary", () => {
     const cursors = complete();
     cursors.completed = false; cursors.paused = true; cursors.manualPaused = true;

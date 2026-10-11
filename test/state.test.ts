@@ -380,6 +380,33 @@ describe("derived decision state", () => {
     }
   });
 
+  it("accepts a capped third-round decision and rejects a malformed one", () => {
+    const capped = {
+      ...base,
+      kind: "consensus" as const,
+      algorithm: "revision-limit-active-roster-v1" as const,
+      decisionId: `consensus:${inputSetHash}:r3`,
+      round: 3 as const,
+      consensusPin: "b".repeat(40),
+      objectors: ["codex"]
+    };
+    expect(consensusDerivedSchema.safeParse(capped).success).toBe(true);
+    expect(consensusDerivedSchema.safeParse({ ...capped, round: 2, decisionId: `consensus:${inputSetHash}:r2` }).success).toBe(false);
+    expect(consensusDerivedSchema.safeParse({ ...capped, objectors: [] }).success).toBe(false);
+    expect(consensusDerivedSchema.safeParse({ ...capped, objectors: ["codex", "claude"] }).success).toBe(false);
+    expect(consensusDerivedSchema.safeParse({ ...capped, objectors: ["cursor"] }).success).toBe(false);
+    const unanimous = {
+      ...base,
+      kind: "consensus" as const,
+      algorithm: "unanimous-active-roster-v1" as const,
+      decisionId: `consensus:${inputSetHash}:r2`,
+      round: 2,
+      consensusPin: "b".repeat(40)
+    };
+    expect(consensusDerivedSchema.safeParse(unanimous).success).toBe(true);
+    expect(consensusDerivedSchema.safeParse({ ...unanimous, objectors: ["codex"] }).success).toBe(false);
+  });
+
   it("binds consensus decision identities to their persisted round", () => {
     const value = {
       ...base,

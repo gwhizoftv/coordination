@@ -64,6 +64,9 @@ export const formatFinalizationPullRequest = (input: {
   draft: boolean;
   evidenceBranch?: string | null;
   evidenceTip?: string | null;
+  /** Present only for a revision-limit closeout. Unanimous PRs omit it. */
+  capped?: boolean;
+  followUpUrls?: readonly string[];
 }): { title: string; body: string } => {
   const issueTitle = input.title.trim() === "" ? "coordinated implementation" : input.title.trim();
   const lines = [
@@ -73,6 +76,10 @@ export const formatFinalizationPullRequest = (input: {
       ? `Draft PR for issue ${input.issue}. Owner merges. Final pin: ${input.finalSha}.`
       : `PR for issue ${input.issue}. Coordinator merges. Final pin: ${input.finalSha}.`
   ];
+  if (input.capped === true) {
+    lines.push("", "Concluded at the revision limit. Remaining objections were filed by the objecting agents.");
+    for (const url of input.followUpUrls ?? []) lines.push(`- ${url}`);
+  }
   if (input.evidenceBranch !== undefined && input.evidenceBranch !== null && input.evidenceBranch !== "") {
     lines.push(
       "",
@@ -87,6 +94,78 @@ export const formatFinalizationPullRequest = (input: {
     title: `Issue ${input.issue}: ${issueTitle}`,
     body: lines.join("\n")
   };
+};
+
+export const followUpFilingKey = (issueSessionId: string, agent: string, revisionSha: string): string =>
+  `coord-follow-up:${issueSessionId}:${agent}:${revisionSha}`;
+
+const githubIssueUrl = /^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)\/issues\/(\d+)\/?$/;
+
+export type FollowUpAssessment =
+  | { status: "ok"; url: string; number: number }
+  | { status: "retry"; reason: string }
+  | { status: "reject"; reason: string };
+
+/**
+ * Confirm a receipt URL is a different issue in the concluding repository.
+ * Lookup failure is retryable. A wrong issue or a missing backlink is a rejection
+ * the objecting agent can correct. This never creates an issue.
+ */
+export const assessFollowUpIssue = async (input: {
+  origin: string;
+  parentIssue: number;
+  parentUrl: string;
+  agent: string;
+  issueSessionId: string;
+  revisionSha: string;
+  followUpUrl: string;
+  cwd: string;
+  runner: CommandRunner;
+}): Promise<FollowUpAssessment> => {
+  const repository = githubRepositoryFromOrigin(input.origin);
+  if (repository === null) {
+    return { status: "reject", reason: `origin ${input.origin} is not a supported github.com repository` };
+  }
+  const match = githubIssueUrl.exec(input.followUpUrl.trim());
+  if (match === null) {
+    return { status: "reject", reason: `follow-up URL ${input.followUpUrl} is not a GitHub issue URL` };
+  }
+  const urlRepository = `${match[1]}/${match[2]!.replace(/\.git$/, "")}`;
+  const number = Number(match[3]);
+  if (urlRepository !== repository) {
+    return { status: "reject", reason: `follow-up issue is in ${urlRepository}, not ${repository}` };
+  }
+  if (number === input.parentIssue) {
+    return { status: "reject", reason: "follow-up URL is the concluding issue, not a separate issue" };
+  }
+  let snapshot: GitHubIssueSnapshot;
+  try {
+    snapshot = await fetchGitHubIssue({ origin: input.origin, issue: number, cwd: input.cwd, runner: input.runner });
+  } catch (error) {
+    return { status: "retry", reason: error instanceof Error ? error.message : String(error) };
+  }
+  const normalized = (url: string): string => url.replace(/\/$/, "");
+  if (normalized(snapshot.url) !== normalized(input.followUpUrl)) {
+    return { status: "reject", reason: "looked-up issue URL does not match the receipt" };
+  }
+  const key = followUpFilingKey(input.issueSessionId, input.agent, input.revisionSha);
+  if (!snapshot.body.includes(key)) {
+    return { status: "reject", reason: "follow-up issue body is missing the filing key" };
+  }
+  if (!snapshot.body.includes(input.revisionSha)) {
+    return { status: "reject", reason: "follow-up issue body is missing the revision SHA" };
+  }
+  const closing = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#${input.parentIssue}\b`, "i");
+  if (closing.test(snapshot.body)) {
+    return { status: "reject", reason: `follow-up issue uses a closing reference to #${input.parentIssue}` };
+  }
+  const linksParent =
+    snapshot.body.includes(input.parentUrl) ||
+    new RegExp(String.raw`(^|[^\w])#${input.parentIssue}\b`).test(snapshot.body);
+  if (!linksParent) {
+    return { status: "reject", reason: "follow-up issue does not link the concluding issue" };
+  }
+  return { status: "ok", url: snapshot.url, number: snapshot.number };
 };
 
 export const githubRepositoryFromOrigin = (origin: string): string | null => {

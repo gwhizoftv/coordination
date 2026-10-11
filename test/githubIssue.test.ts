@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assessFollowUpIssue,
   fetchGitHubIssue,
+  followUpFilingKey,
   formatFinalizationPullRequest,
   githubRepositoryFromOrigin,
   readGitHubIssueSnapshot,
@@ -150,5 +152,77 @@ describe("GitHub issue snapshots", () => {
         draft: false
       }).title
     ).toBe("Issue 112: coordinated implementation");
+  });
+
+  it("names a capped closeout and its follow-up links without dropping the concluding reference", () => {
+    const body = formatFinalizationPullRequest({
+      issue: 177,
+      title: "Conclude review",
+      finalSha: "a".repeat(40),
+      draft: true,
+      capped: true,
+      followUpUrls: ["https://github.com/acme/app/issues/200"]
+    }).body;
+    expect(body).toContain("Closes #177");
+    expect(body).toContain("Concluded at the revision limit.");
+    expect(body).toContain("https://github.com/acme/app/issues/200");
+    expect(body).not.toContain("approved");
+  });
+});
+
+describe("follow-up issue verification", () => {
+  const revision = "d".repeat(40);
+  const key = followUpFilingKey("issue-177:abc", "codex", revision);
+  const parentUrl = "https://github.com/acme/app/issues/177";
+  const assess = (url: string, runner: Parameters<typeof assessFollowUpIssue>[0]["runner"]) =>
+    assessFollowUpIssue({
+      origin: "https://github.com/acme/app.git",
+      parentIssue: 177,
+      parentUrl,
+      agent: "codex",
+      issueSessionId: "issue-177:abc",
+      revisionSha: revision,
+      followUpUrl: url,
+      cwd: "/unused",
+      runner
+    });
+  const issue = (body: string, url = "https://github.com/acme/app/issues/200") =>
+    async (argv: readonly string[]) => {
+      expect(argv).not.toContain("create");
+      expect(argv.slice(0, 3)).toEqual(["gh", "issue", "view"]);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ number: 200, title: "Objections", body, url }),
+        stderr: ""
+      };
+    };
+
+  it("accepts a different issue that carries the key, revision, and a non-closing backlink", async () => {
+    const result = await assess(
+      "https://github.com/acme/app/issues/200",
+      issue(`Remaining failure.\nExpected: the third revision concludes.\n${revision}\n${key}\nSee ${parentUrl}`)
+    );
+    expect(result).toEqual({ status: "ok", url: "https://github.com/acme/app/issues/200", number: 200 });
+  });
+
+  it("rejects the concluding issue, a foreign repository, and a missing backlink or key", async () => {
+    const runner = issue(`no key`);
+    expect((await assess(parentUrl, runner)).status).toBe("reject");
+    expect((await assess("https://github.com/other/repo/issues/200", runner)).status).toBe("reject");
+    expect((await assess("https://github.com/acme/app/issues/200", issue(`${revision}\n${key}`))).status).toBe("reject");
+    expect((await assess("https://github.com/acme/app/issues/200", issue(`${revision}\nSee #177`))).status).toBe("reject");
+    expect(
+      (await assess("https://github.com/acme/app/issues/200", issue(`${revision}\n${key}\nCloses #177`))).status
+    ).toBe("reject");
+  });
+
+  it("retries when the lookup is unavailable and does not create an issue", async () => {
+    const calls: string[][] = [];
+    const result = await assess("https://github.com/acme/app/issues/200", async (argv) => {
+      calls.push([...argv]);
+      throw new Error("gh unavailable");
+    });
+    expect(result.status).toBe("retry");
+    expect(calls.some((argv) => argv.includes("create"))).toBe(false);
   });
 });

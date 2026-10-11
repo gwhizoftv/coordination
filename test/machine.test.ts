@@ -243,24 +243,48 @@ describe("pure workflow machine", () => {
     ]);
   });
 
-  it("never enters revision round four", () => {
+  it.each(["revise", "escalate"] as const)("concludes revision round three for %s without a fourth round", (objection) => {
     const base = initialCursors(start, now);
     const cursors = cursorsStateSchema.parse({
       ...base,
       issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
       derived: { ...base.derived, implementationSelection: implementationDerived },
-      acceptedResponses: consensusResponses(3, "codex"),
+      acceptedResponses: consensusResponses(3, objection === "revise" ? "codex" : null, objection === "escalate" ? "codex" : null),
       ballotBatches: [consensusBatch(3)]
     });
-    expect(decide({ start, cursors })).toEqual([
-      {
-        type: "owner-action-required",
-        reason: "revision limit 3 reached; round 4 is forbidden",
-        kind: "revision-limit",
-        round: 3,
-        allowedAnswers: ["retry", "abandon"]
+    expect(decide({ start, cursors })).toEqual([{ type: "derive-revision-limit", round: 3 }]);
+    const stored = cursorsStateSchema.parse({
+      ...cursors,
+      derived: {
+        ...cursors.derived,
+        consensus: {
+          kind: "consensus",
+          algorithm: "revision-limit-active-roster-v1",
+          inputSetHash: "d".repeat(64),
+          activeRoster: roster,
+          inputs: [
+            {
+              kind: "revision",
+              agent: "codex",
+              submissionSha: "a".repeat(40),
+              path: ".signals/issue-1/revision-ready-codex-round-3.json",
+              productPin: "b".repeat(40)
+            }
+          ],
+          decisionId: `consensus:${"d".repeat(64)}:r3`,
+          supersedes: null,
+          decidedAt: now,
+          round: 3,
+          consensusPin: "b".repeat(40),
+          objectors: ["codex"]
+        }
       }
+    });
+    expect(decide({ start, cursors: stored })).toEqual([
+      { type: "advance-step", from: "R6.ballot", to: "R6.follow-up", round: 3 }
     ]);
+    expect(JSON.stringify(decide({ start, cursors }))).not.toContain("round\":4");
+    expect(decide({ start, cursors }).some((decision) => decision.type === "owner-action-required")).toBe(false);
   });
 
   it("routes revision work to the persisted authorized reviser", () => {
@@ -358,6 +382,117 @@ describe("pure workflow machine", () => {
         allowedAnswers: ["retry", "revise", "abandon"]
       }
     ]);
+  });
+
+  it("keeps an incomplete or stale final batch from skipping objections", () => {
+    const base = initialCursors(start, now);
+    const pending = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      derived: { ...base.derived, implementationSelection: implementationDerived },
+      acceptedResponses: consensusResponses(3, "codex").filter((response) => response.agent !== "cursor"),
+      ballotBatches: []
+    });
+    expect(decide({ start, cursors: pending }).every((decision) => decision.type === "prepare-action")).toBe(true);
+    const unpublished = cursorsStateSchema.parse({
+      ...pending,
+      acceptedResponses: consensusResponses(3, "codex"),
+      ballotBatches: [{ ...consensusBatch(3), status: "pending" }]
+    });
+    expect(decide({ start, cursors: unpublished })).toEqual([{ type: "wait", reason: "ballot evidence publication pending" }]);
+    const stale = consensusBatch(3);
+    stale.responses = stale.responses.map((entry) => ({ ...entry, responseSha256: "f".repeat(64) }));
+    const mismatched = cursorsStateSchema.parse({
+      ...pending,
+      acceptedResponses: consensusResponses(3, "codex"),
+      ballotBatches: [stale]
+    });
+    expect(decide({ start, cursors: mismatched })).toEqual([
+      { type: "publish-ballot-batch", stepId: "R6.ballot", round: 3 }
+    ]);
+    const belowCap = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 2 },
+      derived: { ...base.derived, implementationSelection: implementationDerived },
+      acceptedResponses: consensusResponses(2, "codex"),
+      ballotBatches: [consensusBatch(2)]
+    });
+    expect(decide({ start, cursors: belowCap })).toEqual([
+      { type: "advance-step", from: "R6.ballot", to: "R6.revise", round: 3 }
+    ]);
+    const unanimous = cursorsStateSchema.parse({
+      ...belowCap,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      acceptedResponses: consensusResponses(3, null),
+      ballotBatches: [consensusBatch(3)]
+    });
+    expect(decide({ start, cursors: unanimous })).toEqual([{ type: "derive-consensus", round: 3 }]);
+  });
+
+  it("schedules only objectors and waits for every follow-up receipt", () => {
+    const base = initialCursors(start, now);
+    const followUp = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 },
+      acceptedResponses: consensusResponses(3, "codex", "cursor")
+    });
+    expect(decide({ start, cursors: followUp })).toEqual([
+      { type: "prepare-action", agent: "codex", stepId: "R6.follow-up", round: 3 },
+      { type: "prepare-action", agent: "cursor", stepId: "R6.follow-up", round: 3 }
+    ]);
+    const oneFiled = cursorsStateSchema.parse({
+      ...followUp,
+      accepted: [
+        ...followUp.accepted,
+        { ...accepted("R6.follow-up", "codex", 3), followUpIssueUrl: "https://github.com/example/project/issues/9", followUpIssueNumber: 9 }
+      ]
+    });
+    expect(decide({ start, cursors: oneFiled })).toEqual([
+      { type: "prepare-action", agent: "cursor", stepId: "R6.follow-up", round: 3 }
+    ]);
+    const bothFiled = cursorsStateSchema.parse({
+      ...oneFiled,
+      accepted: [
+        ...oneFiled.accepted,
+        { ...accepted("R6.follow-up", "cursor", 3), followUpIssueUrl: "https://github.com/example/project/issues/10", followUpIssueNumber: 10 }
+      ]
+    });
+    expect(decide({ start, cursors: bothFiled })).toEqual([
+      { type: "advance-step", from: "R6.follow-up", to: "R7.finalize", round: null }
+    ]);
+    const lastObjector = cursorsStateSchema.parse({
+      ...followUp,
+      activeRoster: ["codex"],
+      droppedAgents: ["claude", "cursor", "antigravity"]
+    });
+    expect(decide({ start, cursors: lastObjector })).toEqual([
+      { type: "prepare-action", agent: "codex", stepId: "R6.follow-up", round: 3 }
+    ]);
+  });
+
+  it("retires a stored terminal question only after the final batch is published", () => {
+    const base = initialCursors(start, now);
+    const question = {
+      id: "10000000-0000-4000-8000-000000000009",
+      kind: "revision-limit" as const,
+      round: 3,
+      allowedAnswers: ["retry", "abandon"] as const,
+      createdAt: now
+    };
+    const open = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      ownerQuestion: question,
+      derived: { ...base.derived, implementationSelection: implementationDerived },
+      acceptedResponses: consensusResponses(3, "codex").filter((response) => response.agent !== "cursor")
+    });
+    expect(decide({ start, cursors: open }).some((decision) => decision.type === "owner-action-required")).toBe(false);
+    const published = cursorsStateSchema.parse({
+      ...open,
+      acceptedResponses: consensusResponses(3, "codex"),
+      ballotBatches: [consensusBatch(3)]
+    });
+    expect(decide({ start, cursors: published })).toEqual([{ type: "retire-terminal-question" }]);
   });
 
   it("does not advance a ballot gate before the evidence batch is published", () => {

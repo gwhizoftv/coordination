@@ -11,7 +11,8 @@ const stageNames: Record<WorkflowStepId, string> = {
   "R1.join": "checking agent readiness", "R2.plan": "writing plans", "R3.review": "reviewing plans",
   "R3.plan-ballot": "choosing a plan", "R4.implement": "implementing", "R4.amend-ballot": "reviewing scope changes",
   "R5.compare": "reviewing implementations", "R5.compare-ballot": "choosing an implementation",
-  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R7.finalize": "finalizing"
+  "R6.revise": "revising", "R6.ballot": "reviewing the revision",
+  "R6.follow-up": "filing follow-up issues", "R7.finalize": "finalizing"
 };
 
 export const holdDescription = (reason: CursorsState["holds"][number]["reason"]): string => ({
@@ -180,6 +181,36 @@ export const renderIssueReport = (
     );
   } else if (cursors.ballotBatches.some((batch) => batch.status === "published")) {
     lines.push("Evidence publication: published");
+  }
+
+  const consensus = cursors.derived.consensus;
+  if (consensus?.algorithm === "revision-limit-active-roster-v1") {
+    lines.push(
+      `Conclusion: revision limit reached at round ${consensus.round}. Final revision ${consensus.consensusPin}. Objections remain objections.`
+    );
+    const filed = cursors.accepted.filter(
+      (submission) =>
+        submission.stepId === "R6.follow-up" &&
+        submission.round === consensus.round &&
+        cursors.activeRoster.includes(submission.agent)
+    );
+    const objectors = consensus.objectors.filter((agent) => cursors.activeRoster.includes(agent));
+    lines.push(`Follow-up issues filed: ${filed.length}/${objectors.length}.`);
+    for (const submission of filed) {
+      if (submission.followUpIssueUrl !== undefined) lines.push(`Follow-up issue: ${submission.followUpIssueUrl}`);
+    }
+    const outstanding = objectors.filter((agent) => !filed.some((submission) => submission.agent === agent));
+    if (outstanding.length > 0) lines.push(`Follow-up issues still to file: ${outstanding.join(", ")}.`);
+    for (const response of cursors.acceptedResponses) {
+      if (
+        response.stepId === "R6.ballot" &&
+        response.round === consensus.round &&
+        cursors.droppedAgents.includes(response.agent) &&
+        (response.disposition === "revise" || response.disposition === "escalate")
+      ) {
+        lines.push(`Dropped objection: ${response.agent} is dropped, not approved and not filed.`);
+      }
+    }
   }
 
   if (lifecycle !== undefined) {

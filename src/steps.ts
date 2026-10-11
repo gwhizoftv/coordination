@@ -20,6 +20,7 @@ export type EvidenceId =
   | "comparison-response-accepted"
   | "revision-pinned"
   | "consensus-response-accepted"
+  | "follow-up-published"
   | "finalization-verified";
 
 export type WorkflowStepId =
@@ -33,6 +34,7 @@ export type WorkflowStepId =
   | "R5.compare-ballot"
   | "R6.revise"
   | "R6.ballot"
+  | "R6.follow-up"
   | "R7.finalize";
 
 export type GateId =
@@ -182,6 +184,22 @@ export const STEP_DEFINITIONS: Readonly<Record<WorkflowStepId, StepDefinition>> 
       `.code-reviews/issue-${issue}/consensus-ballot-${agent}-round-${round ?? 1}.json`,
     task: "Submit a consensus ballot judgment as a private response with your disposition and rationale. Do not commit or push."
   },
+  "R6.follow-up": {
+    id: "R6.follow-up",
+    gateId: "gate-6-consensus",
+    evidenceId: "follow-up-published",
+    participants: "all",
+    submissionMode: "git",
+    requiredPath: (issue, agent) => `.signals/issue-${issue}/follow-up-ready-${agent}-round-3.json`,
+    task:
+      "File one GitHub issue for the objections you recorded against the bound revision. " +
+      "Search every issue state in that repository for the filing key below and reuse a match, including after a retry. " +
+      "If creating an issue is uncertain, search again before creating another. " +
+      "Write the body to a file and pass that file to gh issue create. " +
+      "Include a descriptive title, the objections, the expected behavior, the revision SHA, the filing key, " +
+      "and a backlink to the concluding issue that does not use a closing keyword. " +
+      "Publish the follow-up receipt with that issue URL. Do not commit product changes."
+  },
   "R7.finalize": {
     id: "R7.finalize",
     gateId: "gate-7-finalized",
@@ -216,6 +234,7 @@ const consensusSteps: readonly WorkflowStepId[] = [
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ];
 
@@ -388,6 +407,8 @@ export type EvidenceObservation = {
   responseSha256?: string;
   rationale?: string;
   amendmentRequest?: PlanAmendmentRequest;
+  followUpIssueUrl?: string;
+  followUpIssueNumber?: number;
 };
 
 export type MachineDecision =
@@ -403,6 +424,8 @@ export type MachineDecision =
       approvedPaths?: readonly string[];
       choice?: string;
       checkResults?: readonly CheckResult[];
+      followUpIssueUrl?: string;
+      followUpIssueNumber?: number;
     }
   | {
       type: "accept-response";
@@ -419,6 +442,8 @@ export type MachineDecision =
   | { type: "derive-plan-selection" }
   | { type: "derive-implementation-selection" }
   | { type: "derive-consensus"; round: number }
+  | { type: "derive-revision-limit"; round: number }
+  | { type: "retire-terminal-question" }
   | { type: "wait"; reason: string }
   | {
       type: "owner-action-required";

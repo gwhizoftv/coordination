@@ -113,7 +113,13 @@ import {
 import { containmentPolicy, ingestContainmentProbe } from "./shellGuard.js";
 import { holdRecoveryCommand, holdDescription, issueCommand, renderIssueReport } from "./issueReport.js";
 import { inspectStartupAgent } from "./doctor.js";
-import { formatFinalizationPullRequest, githubRepositoryFromOrigin, readGitHubIssueSnapshot } from "./githubIssue.js";
+import {
+  assessFollowUpIssue,
+  followUpFilingKey,
+  formatFinalizationPullRequest,
+  githubRepositoryFromOrigin,
+  readGitHubIssueSnapshot
+} from "./githubIssue.js";
 import { prepareAgentIssueBranches } from "./prepareAgentBranch.js";
 import { harnessPromptReadiness, TmuxController, type IdleOverride } from "./tmux.js";
 import { sha256, sha256OfFile } from "./hash.js";
@@ -365,12 +371,14 @@ export const computeDerivedInputSetHash = (
   kind: "plan-selection" | "implementation-selection" | "consensus",
   activeRoster: readonly string[],
   inputs: readonly DerivedInputCitation[],
-  round?: number | null
+  round?: number | null,
+  domain?: string
 ): string => {
   const citations = inputs.map(canonicalDerivedCitation).sort();
   const fields = [
     "coordinator-derived-decision-v1",
     kind,
+    ...(domain === undefined ? [] : [domain]),
     round == null ? "" : String(round),
     String(activeRoster.length),
     ...activeRoster,
@@ -474,6 +482,33 @@ export const computeImplementationSelectionDerived = (
   };
 };
 
+const historicalConsensusBatch = (cursors: CursorsState, round: number): BallotBatch | null => {
+  const closed = acceptedResponsesAt(cursors, "R6.ballot", true, round);
+  if (!hasCompleteActiveDenominator(cursors, closed)) return null;
+  return (
+    cursors.ballotBatches.find((batch) => {
+      if (batch.kind !== "consensus-ballot-batch" || batch.round !== round || batch.status !== "published") return false;
+      if (batch.activeRoster.length <= cursors.activeRoster.length) return false;
+      if (!cursors.activeRoster.every((agent) => batch.activeRoster.includes(agent))) return false;
+      return cursors.activeRoster.every((agent) => {
+        const response = closed.find((candidate) => candidate.agent === agent);
+        return (
+          response !== undefined &&
+          batch.responses.some(
+            (entry) =>
+              entry.agent === agent &&
+              entry.actionId === response.actionId &&
+              entry.responseSha256 === response.responseSha256
+          )
+        );
+      });
+    }) ?? null
+  );
+};
+
+const consensusBatchForDerivation = (cursors: CursorsState, round: number): BallotBatch | null =>
+  publishedBallotBatch(cursors, "R6.ballot", round) ?? historicalConsensusBatch(cursors, round);
+
 export const computeConsensusDerived = (
   cursors: CursorsState,
   round: number,
@@ -485,27 +520,57 @@ export const computeConsensusDerived = (
   );
   if (revision?.productPin === undefined) return null;
   const ballots = acceptedResponsesAt(cursors, "R6.ballot", true, round);
-  if (!hasCompleteActiveDenominator(cursors, ballots) || ballots.some((ballot) => ballot.disposition !== "approve")) {
+  if (!hasCompleteActiveDenominator(cursors, ballots)) return null;
+  if (ballots.some((ballot) => ballot.disposition !== "approve" && ballot.disposition !== "revise" && ballot.disposition !== "escalate")) {
     return null;
   }
-  const batch = publishedBallotBatch(cursors, "R6.ballot", round);
+  const allApprove = ballots.every((ballot) => ballot.disposition === "approve");
+  if (!allApprove && round !== 3) return null;
+  const batch = consensusBatchForDerivation(cursors, round);
   if (batch === null) return null;
   const inputs = [
     submissionCitation(revision, "revision"),
     ...ballots.map((response) => responseCitation(response, "consensus-ballot", batch))
   ];
-  const inputSetHash = computeDerivedInputSetHash("consensus", cursors.activeRoster, inputs, round);
+  if (allApprove) {
+    const inputSetHash = computeDerivedInputSetHash("consensus", cursors.activeRoster, inputs, round);
+    return {
+      kind: "consensus",
+      algorithm: "unanimous-active-roster-v1",
+      inputSetHash,
+      activeRoster: [...cursors.activeRoster],
+      inputs,
+      decisionId: deriveDecisionId("consensus", inputSetHash, round),
+      supersedes,
+      decidedAt: now,
+      round,
+      consensusPin: revision.productPin
+    };
+  }
+  const objectors = cursors.activeRoster.filter((agent) => {
+    const ballot = ballots.find((candidate) => candidate.agent === agent);
+    return ballot?.disposition === "revise" || ballot?.disposition === "escalate";
+  });
+  if (objectors.length === 0) return null;
+  const inputSetHash = computeDerivedInputSetHash(
+    "consensus",
+    cursors.activeRoster,
+    inputs,
+    round,
+    "revision-limit-active-roster-v1"
+  );
   return {
     kind: "consensus",
-    algorithm: "unanimous-active-roster-v1",
+    algorithm: "revision-limit-active-roster-v1",
     inputSetHash,
     activeRoster: [...cursors.activeRoster],
     inputs,
     decisionId: deriveDecisionId("consensus", inputSetHash, round),
     supersedes,
     decidedAt: now,
-    round,
-    consensusPin: revision.productPin
+    round: 3,
+    consensusPin: revision.productPin,
+    objectors
   };
 };
 
@@ -527,7 +592,11 @@ export const derivedDecisionJournalDetails = (record: DerivedDecisionRecord): Re
           implementationPin: record.implementationPin,
           reviser: record.reviser
         }
-      : { round: record.round, consensusPin: record.consensusPin })
+      : {
+          round: record.round,
+          consensusPin: record.consensusPin,
+          ...(record.algorithm === "revision-limit-active-roster-v1" ? { objectors: [...record.objectors] } : {})
+        })
 });
 
 export const deriveBoundInputs = (
@@ -581,6 +650,30 @@ export const deriveBoundInputs = (
   }
   if (stepId === "R6.ballot") {
     return acceptedAt(cursors, "R6.revise", true, round).map((value) => inputFromSubmission(value, "revision", true));
+  }
+  if (stepId === "R6.follow-up") {
+    const revision = acceptedAt(cursors, "R6.revise", true, round).find(
+      (submission) =>
+        submission.agent === cursors.derived.implementationSelection?.reviser && submission.productPin !== undefined
+    );
+    if (revision === undefined) return [];
+    const batch = consensusBatchForDerivation(cursors, round ?? 3);
+    const ballots = acceptedResponsesAt(cursors, "R6.ballot", true, round);
+    const evidence =
+      batch === null
+        ? []
+        : ballots.flatMap((response) => {
+            const index = batch.responses.findIndex(
+              (entry) =>
+                entry.agent === response.agent &&
+                entry.actionId === response.actionId &&
+                entry.responseSha256 === response.responseSha256
+            );
+            const path = index < 0 ? undefined : batch.paths[index];
+            if (path === undefined) return [];
+            return [{ agent: response.agent, commitSha: batch.commitSha, path, kind: "consensus-ballot" }];
+          });
+    return [inputFromSubmission(revision, "revision", true), ...evidence];
   }
   if (stepId === "R7.finalize") {
     const consensus = cursors.derived.consensus;
@@ -765,6 +858,18 @@ export const buildOrder = (
       : stepId === "R5.compare-ballot"
         ? implementationChoices
         : [];
+  const revisionSha = inputs.find((input) => input.kind === "revision")?.commitSha ?? "";
+  let concludingIssueUrl = "";
+  let concludingIssueNumber = start.issue;
+  if (stepId === "R6.follow-up") {
+    try {
+      const snapshot = readGitHubIssueSnapshot(paths.issueSnapshot);
+      concludingIssueUrl = snapshot.url;
+      concludingIssueNumber = snapshot.number;
+    } catch {
+      concludingIssueUrl = "";
+    }
+  }
   const scaffold = renderArtifactScaffold({
     stepId,
     issue: start.issue,
@@ -777,7 +882,21 @@ export const buildOrder = (
     round,
     approvedPaths,
     actionId,
-    scopeHash
+    scopeHash,
+    ...(cursors.derived.consensus === null || stepId !== "R7.finalize"
+      ? {}
+      : { conclusion: cursors.derived.consensus.algorithm }),
+    ...(stepId !== "R6.follow-up"
+      ? {}
+      : {
+          filing: {
+            repository: githubRepositoryFromOrigin(start.origin),
+            concludingIssueUrl,
+            concludingIssueNumber,
+            revisionSha,
+            filingKey: revisionSha === "" ? "" : followUpFilingKey(start.issueSessionId, agent, revisionSha)
+          }
+        })
   });
   const binding =
     scaffold === ""
@@ -1940,7 +2059,9 @@ export class CoordinatorRunLoop {
       ...(decision.choice === undefined ? {} : { choice: decision.choice }),
       ...(decision.checkResults === undefined
         ? {}
-        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) })
+        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) }),
+      ...(decision.followUpIssueUrl === undefined ? {} : { followUpIssueUrl: decision.followUpIssueUrl }),
+      ...(decision.followUpIssueNumber === undefined ? {} : { followUpIssueNumber: decision.followUpIssueNumber })
     };
     const withoutPrior = cursors.accepted.filter(
       (item) => !(item.stepId === accepted.stepId && item.agent === accepted.agent && item.round === accepted.round)
@@ -2562,6 +2683,51 @@ export class CoordinatorRunLoop {
     });
   }
 
+  async verifyFollowUpReceipt(
+    start: StartState,
+    order: InternalOrder,
+    observation: EvidenceObservation
+  ): Promise<EvidenceObservation> {
+    if (observation.status !== "satisfied" || order.evidenceId !== "follow-up-published" || observation.followUpIssueUrl === undefined) {
+      return observation;
+    }
+    const revisionSha = order.inputs.find((input) => input.kind === "revision")?.commitSha;
+    if (revisionSha === undefined) {
+      return { ...observation, status: "rejected", outstanding: ["follow-up receipt is not bound to the final revision"] };
+    }
+    let parent;
+    try {
+      parent = readGitHubIssueSnapshot(this.paths.issueSnapshot);
+    } catch (error) {
+      return {
+        ...observation,
+        status: "retry",
+        outstanding: [`concluding issue snapshot is unavailable: ${error instanceof Error ? error.message : String(error)}`]
+      };
+    }
+    if (parent.number !== start.issue) {
+      return {
+        ...observation,
+        status: "retry",
+        outstanding: [`concluding issue snapshot number ${parent.number} does not match issue ${start.issue}`]
+      };
+    }
+    const assessed = await assessFollowUpIssue({
+      origin: start.origin,
+      parentIssue: parent.number,
+      parentUrl: parent.url,
+      agent: order.agent,
+      issueSessionId: start.issueSessionId,
+      revisionSha,
+      followUpUrl: observation.followUpIssueUrl,
+      cwd: this.mirror.path,
+      runner: (argv, cwd) => this.processRunner(argv, cwd)
+    });
+    if (assessed.status === "retry") return { ...observation, status: "retry", outstanding: [assessed.reason] };
+    if (assessed.status === "reject") return { ...observation, status: "rejected", outstanding: [assessed.reason] };
+    return { ...observation, followUpIssueUrl: assessed.url, followUpIssueNumber: assessed.number };
+  }
+
   async verifyFinalizationChecks(
     start: StartState,
     order: InternalOrder,
@@ -2682,40 +2848,59 @@ export class CoordinatorRunLoop {
       this.log(`[OK] Final branch ${branch} pushed.`);
       this.authority(authority, true);
       const draft = !coordMergesPullRequest(start.prPolicy);
-      const { title, body } = formatFinalizationPullRequest({
-        issue: start.issue,
-        title: issueSnapshot.title,
-        finalSha,
-        draft,
-        evidenceBranch: cursors.evidence.branch,
-        evidenceTip: cursors.evidence.tip
-      });
-      this.log("[WAIT] Opening the pull request...");
-      const result = await this.pullRequestOpener({
-        repository,
-        base: start.baseBranch,
-        head: branch,
-        title,
-        body,
-        draft
-      });
-      openedUrl = result.url;
-      this.log(`[OK] Pull request: ${result.url}`);
+      const capped = cursors.derived.consensus?.algorithm === "revision-limit-active-roster-v1";
+      const followUpUrls = cursors.accepted
+        .filter(
+          (submission) =>
+            submission.stepId === "R6.follow-up" &&
+            submission.followUpIssueUrl !== undefined &&
+            cursors.activeRoster.includes(submission.agent)
+        )
+        .map((submission) => submission.followUpIssueUrl as string);
+      let resultUrl = openedUrl;
+      const alreadyOpen = resultUrl !== null;
+      if (resultUrl === null) {
+        const { title, body } = formatFinalizationPullRequest({
+          issue: start.issue,
+          title: issueSnapshot.title,
+          finalSha,
+          draft,
+          evidenceBranch: cursors.evidence.branch,
+          evidenceTip: cursors.evidence.tip,
+          ...(capped ? { capped: true, followUpUrls } : {})
+        });
+        this.log("[WAIT] Opening the pull request...");
+        const result = await this.pullRequestOpener({
+          repository,
+          base: start.baseBranch,
+          head: branch,
+          title,
+          body,
+          draft
+        });
+        resultUrl = result.url;
+        this.log(`[OK] Pull request: ${resultUrl}`);
+      } else {
+        this.log(`[OK] Pull request already open: ${resultUrl}`);
+      }
+      openedUrl = resultUrl;
       this.authority(authority, true);
       if (coordMergesPullRequest(start.prPolicy)) {
         this.log("[WAIT] Merging the pull request...");
-        await this.pullRequestMerger({ url: result.url });
+        await this.pullRequestMerger({ url: resultUrl });
         this.log("[OK] Pull request merged.");
         this.authority(authority, true);
       }
       return this.mutate(authority, (current) => {
-        appendJournal(
-          this.paths,
-          { type: "pr-created", agent: current.derived.implementationSelection?.reviser ?? undefined, details: { url: result.url, branch, finalSha } },
-          this.now()
-        );
+        if (!alreadyOpen) {
+          appendJournal(
+            this.paths,
+            { type: "pr-created", agent: current.derived.implementationSelection?.reviser ?? undefined, details: { url: resultUrl, branch, finalSha } },
+            this.now()
+          );
+        }
         if (coordMergesPullRequest(start.prPolicy)) {
-          appendJournal(this.paths, { type: "pr-merged", details: { url: result.url, branch, finalSha } }, this.now());
+          appendJournal(this.paths, { type: "pr-merged", details: { url: resultUrl, branch, finalSha } }, this.now());
         }
         return cursorsStateSchema.parse({
           ...current,
@@ -2723,7 +2908,7 @@ export class CoordinatorRunLoop {
             status: "completed",
             finalSha,
             branch,
-            url: result.url,
+            url: resultUrl,
             error: null,
             attempts: current.publication.attempts + 1
           },
@@ -2842,7 +3027,10 @@ export class CoordinatorRunLoop {
       start,
       cursors,
       "consensus",
-      (current, now, supersedes) => computeConsensusDerived(current, round, now, supersedes),
+      (current, now, supersedes) => {
+        const record = computeConsensusDerived(current, round, now, supersedes);
+        return record?.algorithm === "unanimous-active-roster-v1" ? record : null;
+      },
       {
       type: "advance-step",
       from: "R6.ballot",
@@ -2850,6 +3038,50 @@ export class CoordinatorRunLoop {
       round: null
       }
     );
+  }
+
+  private applyDerivedRevisionLimit(start: StartState, cursors: CursorsState, round: number): CursorsState {
+    return this.persistDerivedDecision(
+      start,
+      cursors,
+      "consensus",
+      (current, now, supersedes) => {
+        const record = computeConsensusDerived(current, round, now, supersedes);
+        return record?.algorithm === "revision-limit-active-roster-v1" ? record : null;
+      },
+      {
+        type: "advance-step",
+        from: "R6.ballot",
+        to: "R6.follow-up",
+        round
+      }
+    );
+  }
+
+  private retireTerminalQuestion(cursors: CursorsState): CursorsState {
+    const question = cursors.ownerQuestion;
+    if (question === null) return cursors;
+    return this.mutate(cursors, (current) => {
+      if (current.ownerQuestion?.id !== question.id) return current;
+      appendJournal(
+        this.paths,
+        {
+          type: "terminal-question-retired",
+          details: {
+            questionId: question.id,
+            kind: question.kind,
+            round: question.round,
+            eventId: `terminal-question-retired:${question.id}`
+          }
+        },
+        this.now()
+      );
+      return cursorsStateSchema.parse({
+        ...current,
+        ownerQuestion: null,
+        updatedAt: this.now()
+      });
+    });
   }
 
   private async applyDecisions(start: StartState, cursors: CursorsState, decisions: readonly MachineDecision[]): Promise<CursorsState> {
@@ -2890,6 +3122,10 @@ export class CoordinatorRunLoop {
         next = this.applyDerivedImplementationSelection(start, next);
       } else if (decision.type === "derive-consensus") {
         next = this.applyDerivedConsensus(start, next, decision.round);
+      } else if (decision.type === "derive-revision-limit") {
+        next = this.applyDerivedRevisionLimit(start, next, decision.round);
+      } else if (decision.type === "retire-terminal-question") {
+        next = this.retireTerminalQuestion(next);
       } else if (decision.type === "advance-step") {
         this.logPhase(start.issue, decision.to, decision.round, decision.from);
         next = this.advance(next, decision);
@@ -3134,6 +3370,8 @@ export class CoordinatorRunLoop {
       let observation = await evaluateEvidence(order, completion.sha, this.mirror as EvidenceMirror, () =>
         this.authority(cursors)
       );
+      this.authority(cursors);
+      observation = await this.verifyFollowUpReceipt(start, order, observation);
       this.authority(cursors);
       observation = await this.verifyFinalizationChecks(start, order, observation, cursors);
       this.authority(cursors);
