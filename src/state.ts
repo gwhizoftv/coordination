@@ -62,6 +62,7 @@ const stepIdSchema = z.enum([
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ]);
 const gateIdSchema = z.enum([
@@ -84,6 +85,7 @@ const evidenceIdSchema = z.enum([
   "comparison-response-accepted",
   "revision-pinned",
   "consensus-response-accepted",
+  "follow-up-published",
   "finalization-verified"
 ]);
 const ballotStepIdSchema = z.enum(["R3.plan-ballot", "R5.compare-ballot", "R6.ballot", "R4.amend-ballot"]);
@@ -582,7 +584,7 @@ export const implementationSelectionDerivedSchema = derivedDecisionBaseSchema
     message: "decision identity must match the implementation-selection input hash"
   });
 
-export const consensusDerivedSchema = derivedDecisionBaseSchema
+export const unanimousConsensusDerivedSchema = derivedDecisionBaseSchema
   .extend({
     kind: z.literal("consensus"),
     algorithm: z.literal("unanimous-active-roster-v1"),
@@ -596,6 +598,27 @@ export const consensusDerivedSchema = derivedDecisionBaseSchema
     path: ["decisionId"],
     message: "decision identity must match the consensus input hash and round"
   });
+
+export const revisionLimitConsensusDerivedSchema = derivedDecisionBaseSchema
+  .extend({
+    kind: z.literal("consensus"),
+    algorithm: z.literal("revision-limit-active-roster-v1"),
+    decisionId: consensusDecisionIdSchema,
+    supersedes: consensusDecisionIdSchema.nullable(),
+    round: z.literal(3),
+    consensusPin: gitShaSchema,
+    objectors: z.array(agentIdSchema).min(1)
+  })
+  .strict()
+  .refine((record) => record.decisionId === `consensus:${record.inputSetHash}:r${record.round}`, {
+    path: ["decisionId"],
+    message: "decision identity must match the consensus input hash and round"
+  });
+
+export const consensusDerivedSchema = z.discriminatedUnion("algorithm", [
+  unanimousConsensusDerivedSchema,
+  revisionLimitConsensusDerivedSchema
+]);
 
 export const derivedStateSchema = z
   .object({
@@ -632,7 +655,9 @@ export const acceptedSubmissionSchema = z
       )
       .optional(),
     path: z.string().min(1),
-    acceptedAt: timestampSchema
+    acceptedAt: timestampSchema,
+    followUpIssue: z.number().int().positive().optional(),
+    followUpUrl: z.string().url().optional()
   })
   .strict();
 

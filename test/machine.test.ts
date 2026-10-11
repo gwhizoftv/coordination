@@ -243,23 +243,79 @@ describe("pure workflow machine", () => {
     ]);
   });
 
-  it("never enters revision round four", () => {
+  it("concludes round three by deriving consensus and scheduling only objectors for follow-up filing", () => {
     const base = initialCursors(start, now);
-    const cursors = cursorsStateSchema.parse({
+    const reviseCursors = cursorsStateSchema.parse({
       ...base,
       issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
       derived: { ...base.derived, implementationSelection: implementationDerived },
       acceptedResponses: consensusResponses(3, "codex"),
       ballotBatches: [consensusBatch(3)]
     });
-    expect(decide({ start, cursors })).toEqual([
-      {
-        type: "owner-action-required",
-        reason: "revision limit 3 reached; round 4 is forbidden",
-        kind: "revision-limit",
-        round: 3,
-        allowedAnswers: ["retry", "abandon"]
+    expect(decide({ start, cursors: reviseCursors })).toEqual([
+      { type: "derive-consensus", round: 3 }
+    ]);
+
+    const escalateCursors = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      derived: { ...base.derived, implementationSelection: implementationDerived },
+      acceptedResponses: consensusResponses(3, null, "codex"),
+      ballotBatches: [consensusBatch(3)]
+    });
+    expect(decide({ start, cursors: escalateCursors })).toEqual([
+      { type: "derive-consensus", round: 3 }
+    ]);
+
+    const followUpCursors = cursorsStateSchema.parse({
+      ...base,
+      issueCursor: { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 },
+      derived: {
+        ...base.derived,
+        implementationSelection: implementationDerived,
+        consensus: {
+          kind: "consensus",
+          algorithm: "revision-limit-active-roster-v1",
+          inputSetHash: "c".repeat(64),
+          activeRoster: roster,
+          inputs: [
+            {
+              kind: "revision",
+              agent: "cursor",
+              submissionSha: "e".repeat(40),
+              path: ".signals/issue-1/revision-ready-cursor-round-3.json"
+            }
+          ],
+          decisionId: `consensus:${"c".repeat(64)}:r3`,
+          supersedes: null,
+          decidedAt: now,
+          round: 3,
+          consensusPin: "d".repeat(40),
+          objectors: ["codex"]
+        }
       }
+    });
+    expect(decide({ start, cursors: followUpCursors })).toEqual([
+      { type: "prepare-action", agent: "codex", stepId: "R6.follow-up", round: 3 }
+    ]);
+
+    const receiptAcceptedCursors = cursorsStateSchema.parse({
+      ...followUpCursors,
+      accepted: [
+        {
+          stepId: "R6.follow-up",
+          agent: "codex",
+          round: 3,
+          submissionSha: "e".repeat(40),
+          path: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+          acceptedAt: now,
+          followUpIssue: 101,
+          followUpUrl: "https://github.com/example/repo/issues/101"
+        }
+      ]
+    });
+    expect(decide({ start, cursors: receiptAcceptedCursors })).toEqual([
+      { type: "advance-step", from: "R6.follow-up", to: "R7.finalize", round: null }
     ]);
   });
 

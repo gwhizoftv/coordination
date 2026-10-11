@@ -3,6 +3,7 @@ import { sha256 } from "./hash.js";
 import type { FetchResult } from "./mirror.js";
 import {
   finalizationArtifactSchema,
+  followUpReadyArtifactSchema,
   implementationReadyArtifactSchema,
   participationReadyArtifactSchema,
   planAmendmentRequestSchema,
@@ -189,7 +190,7 @@ const satisfied = (
   sha: string,
   extra: Pick<
     EvidenceObservation,
-    "productPin" | "disposition" | "approvedPaths" | "choice" | "checkResults"
+    "productPin" | "disposition" | "approvedPaths" | "choice" | "checkResults" | "followUpUrl" | "followUpIssue"
   > = {}
 ): EvidenceObservation => ({
   agent: order.agent,
@@ -375,6 +376,24 @@ export const evaluateEvidence = async (
     }
     return errors.length === 0
       ? satisfied(order, submissionSha, { productPin: parsed.value.revisedBranchHead })
+      : rejected(order, submissionSha, errors);
+  }
+
+  if (order.evidenceId === "follow-up-published") {
+    const parsed = parseJsonWithSchema(blob, followUpReadyArtifactSchema);
+    if (!parsed.ok) return rejected(order, submissionSha, [`invalid follow-up-ready artifact: ${parsed.error}`]);
+    const errors = [
+      ...commonErrors(parsed.value, order),
+      ...inputHashErrors(parsed.value.inputSetHash, order)
+    ];
+    if (parsed.value.actionId !== order.actionId) errors.push("follow-up artifact actionId does not match the current action");
+    if (parsed.value.round !== 3 || order.round !== 3) errors.push("follow-up round must be 3");
+    const revisionInput = order.inputs.find((input) => input.kind === "revision");
+    if (revisionInput !== undefined && parsed.value.revisionCommitSha !== revisionInput.commitSha) {
+      errors.push("follow-up revisionCommitSha does not match the bound revision pin");
+    }
+    return errors.length === 0
+      ? satisfied(order, submissionSha, { followUpUrl: parsed.value.followUpIssueUrl })
       : rejected(order, submissionSha, errors);
   }
 

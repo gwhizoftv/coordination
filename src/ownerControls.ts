@@ -143,8 +143,21 @@ const rederiveAfterDrop = (
     }));
   };
 
+  const isTerminalRound3 = priorConsensus !== null && priorConsensus.round === 3;
+  if (isTerminalRound3) {
+    next = cursorsStateSchema.parse({
+      ...next,
+      derived: {
+        ...next.derived,
+        planSelection: priorPlan,
+        implementationSelection: priorImplementation
+      },
+      updatedAt: now
+    });
+  }
+
   let reset = false;
-  if (priorPlan !== null) {
+  if (!isTerminalRound3 && priorPlan !== null) {
     if (next.activeRoster.length === 1) {
       if (priorPlan.selectedAgents[0] !== next.activeRoster[0]) {
         next = resetTo(next, "R4.implement", null, (step) =>
@@ -175,7 +188,7 @@ const rederiveAfterDrop = (
     }
   }
 
-  if (!reset && priorImplementation !== null && next.activeRoster.length > 1) {
+  if (!reset && !isTerminalRound3 && priorImplementation !== null && next.activeRoster.length > 1) {
     const implementation = computeImplementationSelectionDerived(next, now, priorImplementation.decisionId);
     if (implementation === null) {
       next = resetTo(next, "R5.compare-ballot", null, (step) =>
@@ -200,18 +213,27 @@ const rederiveAfterDrop = (
     }
   }
 
-  if (!reset && priorConsensus !== null && next.activeRoster.length > 1) {
+  if (!reset && priorConsensus !== null && (next.activeRoster.length > 1 || isTerminalRound3)) {
     const consensus = computeConsensusDerived(next, priorConsensus.round, now, priorConsensus.decisionId);
     if (consensus === null) {
-      next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R7.finalize");
-      reset = true;
+      if (!isTerminalRound3) {
+        next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R7.finalize");
+        reset = true;
+      }
     } else {
       next = cursorsStateSchema.parse({
         ...next,
         derived: { ...next.derived, consensus: persistDecision(consensus) },
         updatedAt: now
       });
-      if (consensus.consensusPin !== priorConsensus.consensusPin) {
+      if (isTerminalRound3) {
+        if (consensus.algorithm === "unanimous-active-roster-v1" && next.issueCursor.stepId === "R6.follow-up") {
+          next = {
+            ...next,
+            issueCursor: { stepId: "R7.finalize", gateId: STEP_DEFINITIONS["R7.finalize"].gateId, round: null }
+          };
+        }
+      } else if (consensus.consensusPin !== priorConsensus.consensusPin) {
         next = resetTo(next, "R7.finalize", null, (step) => step === "R7.finalize");
         reset = true;
       }

@@ -19,6 +19,7 @@ import {
   buildOrder,
   computeDerivedInputSetHash,
   computePlanSelectionDerived,
+  computeConsensusDerived,
   CoordinatorRunLoop,
   derivedDecisionJournalDetails,
   deterministicWinner,
@@ -48,9 +49,9 @@ import { parseClaudeRateLimits, parseCodexRateLimits } from "../src/resourceEvid
 import { resourceBindingPaths } from "../src/paths.js";
 import type { RunLoopDependencies } from "../src/runLoop.js";
 import { writeAgentResponse } from "../src/ballotResponse.js";
-import { queueOwnerGuidance } from "../src/ownerControls.js";
+import { queueOwnerGuidance, dropOwnerAgent } from "../src/ownerControls.js";
 import type { ConsensusBallotResponse } from "../src/protocol.js";
-import type { AcceptedResponse, BallotBatch } from "../src/state.js";
+import type { AcceptedResponse, AcceptedSubmission, BallotBatch } from "../src/state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { hookVerificationRecorder, createVerificationIngestor, verificationMeasurement } from "../src/verificationLog.js";
 import * as stateModule from "../src/state.js";
@@ -3894,5 +3895,324 @@ describe("coordinator-resolved change scope", () => {
     const order = buildOrder(paths, start, readCursorsState(paths), "claude", "R2.plan", null);
     expect(order.contextPaths).toEqual(["docs/repo-map.md"]);
     expect(order.changeScope).toEqual([]);
+  });
+
+  it("derives revision-limit consensus at round 3 with objections and distinct input set hash", () => {
+    const { paths } = fixture();
+    const now = "2026-08-11T17:00:00.000Z";
+    const revSha = "8".repeat(40);
+    const revision: AcceptedSubmission = {
+      stepId: "R6.revise",
+      agent: "codex",
+      round: 3,
+      submissionSha: "7".repeat(40),
+      productPin: revSha,
+      path: ".signals/issue-1/revision-ready-codex-round-3.json",
+      acceptedAt: now
+    };
+    const ballots: AcceptedResponse[] = [
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "codex", round: 3, disposition: "approve" }),
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "claude", round: 3, disposition: "revise" })
+    ];
+    const batch = publishedBallotBatchFixture({
+      kind: "consensus-ballot-batch",
+      round: 3,
+      activeRoster: ["claude", "codex"]
+    });
+    const state = cursorsStateSchema.parse({
+      ...readCursorsState(paths),
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      activeRoster: ["claude", "codex"],
+      derived: {
+        planSelection: null,
+        implementationSelection: {
+          kind: "implementation-selection",
+          algorithm: "plurality-active-roster-v1",
+          inputSetHash: "b".repeat(64),
+          activeRoster: ["claude", "codex"],
+          inputs: [
+            {
+              kind: "implementation",
+              agent: "codex",
+              submissionSha: "e".repeat(40),
+              path: ".signals/issue-1/implementation-ready-codex.json",
+              productPin: "e".repeat(40)
+            }
+          ],
+          decisionId: `implementation-selection:${"b".repeat(64)}`,
+          supersedes: null,
+          decidedAt: now,
+          winner: "codex",
+          implementationPin: "e".repeat(40),
+          reviser: "codex"
+        },
+        consensus: null
+      },
+      accepted: [revision],
+      acceptedResponses: ballots,
+      ballotBatches: [batch]
+    });
+
+    const derived = computeConsensusDerived(state, 3, now);
+    expect(derived).not.toBeNull();
+    expect(derived?.algorithm).toBe("revision-limit-active-roster-v1");
+    expect(derived?.round).toBe(3);
+    expect(derived?.consensusPin).toBe(revSha);
+    if (derived?.algorithm === "revision-limit-active-roster-v1") {
+      expect(derived.objectors).toEqual(["claude"]);
+    }
+
+    const unanimousHash = computeDerivedInputSetHash("consensus", state.activeRoster, derived!.inputs, 3);
+    expect(derived?.inputSetHash).not.toBe(unanimousHash);
+    expect(derived?.inputSetHash).toBe(
+      computeDerivedInputSetHash("consensus:revision-limit", state.activeRoster, derived!.inputs, 3)
+    );
+  });
+
+  it("recovers obsolete round 3 revision-limit owner question on restart", async () => {
+    const { paths } = fixture();
+    const now = "2026-08-11T17:00:00.000Z";
+    const revSha = "8".repeat(40);
+    const revision: AcceptedSubmission = {
+      stepId: "R6.revise",
+      agent: "codex",
+      round: 3,
+      submissionSha: "7".repeat(40),
+      productPin: revSha,
+      path: ".signals/issue-1/revision-ready-codex-round-3.json",
+      acceptedAt: now
+    };
+    const ballots: AcceptedResponse[] = [
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "codex", round: 3, disposition: "approve" }),
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "claude", round: 3, disposition: "revise" })
+    ];
+    const batch = publishedBallotBatchFixture({
+      kind: "consensus-ballot-batch",
+      round: 3,
+      activeRoster: ["claude", "codex"]
+    });
+    mutateCursorsState(paths, (current) =>
+      cursorsStateSchema.parse({
+        ...current,
+        issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+        activeRoster: ["claude", "codex"],
+        derived: {
+          planSelection: null,
+          implementationSelection: {
+            kind: "implementation-selection",
+            algorithm: "plurality-active-roster-v1",
+            inputSetHash: "b".repeat(64),
+            activeRoster: ["claude", "codex"],
+            inputs: [
+            {
+              kind: "implementation",
+              agent: "codex",
+              submissionSha: "e".repeat(40),
+              path: ".signals/issue-1/implementation-ready-codex.json",
+              productPin: "e".repeat(40)
+            }
+          ],
+            decisionId: `implementation-selection:${"b".repeat(64)}`,
+            supersedes: null,
+            decidedAt: now,
+            winner: "codex",
+            implementationPin: "e".repeat(40),
+            reviser: "codex"
+          },
+          consensus: null
+        },
+        accepted: [revision],
+        acceptedResponses: ballots,
+        ballotBatches: [batch],
+        ownerQuestion: {
+          id: "30000000-0000-4000-8000-000000000001",
+          kind: "revision-limit",
+          round: 3,
+          allowedAnswers: ["retry", "abandon"],
+          createdAt: now
+        }
+      })
+    );
+
+    const loop = new CoordinatorRunLoop(paths, { tmux: null, now: () => now });
+    const after = await loop.runTick();
+    expect(after.ownerQuestion).toBeNull();
+    expect(after.derived.consensus?.algorithm).toBe("revision-limit-active-roster-v1");
+    expect(after.issueCursor.stepId).toBe("R6.follow-up");
+  });
+
+  it("preserves terminal round 3 consensus and final pin across late non-reviser drops", () => {
+    const { paths } = fixture();
+    const now = "2026-08-11T17:00:00.000Z";
+    const revSha = "8".repeat(40);
+    const revision: AcceptedSubmission = {
+      stepId: "R6.revise",
+      agent: "codex",
+      round: 3,
+      submissionSha: "7".repeat(40),
+      productPin: revSha,
+      path: ".signals/issue-1/revision-ready-codex-round-3.json",
+      acceptedAt: now
+    };
+    const ballots: AcceptedResponse[] = [
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "codex", round: 3, disposition: "approve" }),
+      acceptedResponseFixture({ stepId: "R6.ballot", agent: "claude", round: 3, disposition: "revise" })
+    ];
+    const batch = publishedBallotBatchFixture({
+      kind: "consensus-ballot-batch",
+      round: 3,
+      activeRoster: ["claude", "codex"]
+    });
+    mutateCursorsState(paths, (current) =>
+      cursorsStateSchema.parse({
+        ...current,
+        issueCursor: { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 },
+        activeRoster: ["claude", "codex"],
+        derived: {
+          planSelection: {
+            kind: "plan-selection",
+            algorithm: "plurality-active-roster-v1",
+            inputSetHash: "a".repeat(64),
+            activeRoster: ["claude", "codex"],
+            inputs: [
+              {
+                kind: "plan",
+                agent: "codex",
+                submissionSha: "e".repeat(40),
+                path: ".plans/issue-1/plan.md"
+              }
+            ],
+            decisionId: `plan-selection:${"a".repeat(64)}`,
+            supersedes: null,
+            decidedAt: now,
+            selectedAgents: ["codex"]
+          },
+          implementationSelection: {
+            kind: "implementation-selection",
+            algorithm: "plurality-active-roster-v1",
+            inputSetHash: "b".repeat(64),
+            activeRoster: ["claude", "codex"],
+            inputs: [
+              {
+                kind: "implementation",
+                agent: "codex",
+                submissionSha: "e".repeat(40),
+                path: ".signals/issue-1/implementation-ready-codex.json",
+                productPin: "e".repeat(40)
+              }
+            ],
+            decisionId: `implementation-selection:${"b".repeat(64)}`,
+            supersedes: null,
+            decidedAt: now,
+            winner: "codex",
+            implementationPin: "e".repeat(40),
+            reviser: "codex"
+          },
+          consensus: {
+            kind: "consensus",
+            algorithm: "revision-limit-active-roster-v1",
+            inputSetHash: "c".repeat(64),
+            activeRoster: ["claude", "codex"],
+            inputs: [
+              {
+                kind: "revision",
+                agent: "codex",
+                submissionSha: "e".repeat(40),
+                path: ".signals/issue-1/revision-ready-codex-round-3.json"
+              }
+            ],
+            decisionId: `consensus:${"c".repeat(64)}:r3`,
+            supersedes: null,
+            decidedAt: now,
+            round: 3,
+            consensusPin: revSha,
+            objectors: ["claude"]
+          }
+        },
+        accepted: [revision],
+        acceptedResponses: ballots,
+        ballotBatches: [batch]
+      })
+    );
+
+    const droppedState = dropOwnerAgent(paths, "claude", now);
+    expect(droppedState.activeRoster).toEqual(["codex"]);
+    expect(droppedState.derived.consensus?.consensusPin).toBe(revSha);
+    expect(droppedState.derived.implementationSelection?.winner).toBe("codex");
+    expect(droppedState.derived.consensus?.algorithm).toBe("unanimous-active-roster-v1");
+    expect(droppedState.issueCursor.stepId).toBe("R7.finalize");
+  });
+
+  it("verifies follow-up receipts and includes closeout reason and links in PR", async () => {
+    const { paths } = fixture({ prPolicy: "coord-open-unmerged", origin: "https://github.com/example/project.git" });
+    const now = "2026-08-11T17:00:00.000Z";
+    const revSha = "8".repeat(40);
+    seedPendingPublication(paths, revSha);
+
+    const current = readCursorsState(paths);
+    writeCursorsState(
+      paths,
+      cursorsStateSchema.parse({
+        ...current,
+        derived: {
+          ...current.derived,
+          consensus: {
+            kind: "consensus",
+            algorithm: "revision-limit-active-roster-v1",
+            inputSetHash: "c".repeat(64),
+            activeRoster: ["claude", "codex"],
+            inputs: [
+              {
+                kind: "revision",
+                agent: "codex",
+                submissionSha: "e".repeat(40),
+                path: ".signals/issue-1/revision-ready-codex-round-3.json"
+              }
+            ],
+            decisionId: `consensus:${"c".repeat(64)}:r3`,
+            supersedes: null,
+            decidedAt: now,
+            round: 3,
+            consensusPin: revSha,
+            objectors: ["claude"]
+          }
+        },
+        accepted: [
+          ...current.accepted,
+          {
+            stepId: "R6.follow-up",
+            agent: "claude",
+            round: 3,
+            submissionSha: "d".repeat(40),
+            path: ".signals/issue-1/follow-up-ready-claude-round-3.json",
+            acceptedAt: now,
+            followUpIssue: 105,
+            followUpUrl: "https://github.com/example/project/issues/105"
+          }
+        ]
+      })
+    );
+
+    const mirror = new BareMirror(paths.mirror, "https://github.com/example/project.git", async () => ({
+      exitCode: 0,
+      stdout: Buffer.alloc(0),
+      stderr: ""
+    }));
+
+    const opened: Array<{ draft: boolean; title: string; body: string }> = [];
+    const result = await new CoordinatorRunLoop(paths, {
+      tmux: null,
+      mirror,
+      pullRequestOpener: async (input) => {
+        opened.push({ draft: input.draft, title: input.title, body: input.body });
+        return { url: "https://github.com/example/project/pull/10" };
+      }
+    }).runTick();
+
+    expect(result.publication.status).toBe("completed");
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.body).toContain("Conclusion: Concluded development at the third revision limit with unresolved objections.");
+    expect(opened[0]?.body).toContain("Follow-up issues filed by objecting agents:");
+    expect(opened[0]?.body).toContain("- claude: #105 (https://github.com/example/project/issues/105)");
   });
 });

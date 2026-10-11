@@ -530,8 +530,14 @@ submit private responses; the coordinator archives them, builds one
 fast-forward commit on `issue-<n>/coordinator-evidence`, and only then derives
 selection or advances. The highest vote count wins; ties use persisted
 active-roster order. Selected plans, the implementation owner/pin, and the
-authorized reviser are stored separately. Round 1 binds only the selected
-implementation, and later rounds bind only the preceding accepted revision.
+authorized reviser are stored separately. Round 1 binds only the selected implementation, and later rounds bind only the preceding accepted revision.
+When round 3 ballots conclude, unanimous approval proceeds directly to finalization.
+If any active agent objects (`revise` or `escalate`) in the sealed round 3 batch, development
+concludes at the third revision: objecting agents are assigned a conditional follow-up task
+(`R6.follow-up`) to file and link a GitHub issue citing their unresolved objections, the concluding
+issue, the final revision commit SHA, and a stable filing key. Once all objecting receipts are verified,
+the coordinator orders the reviser to finalize the third revision commit. There is no fourth revision
+and no owner retry loop.
 
 When drops leave one active agent, future unresolved work degrades to the solo
 sequence. Completed historical gates and immutable product pins are retained.
@@ -628,8 +634,9 @@ runner and use `coord detach N` to close the issue UI.
 
 After recovery, the runner continues from strict versioned state. State changes use a short
 exclusive lock plus a monotonic revision, so an in-flight fetch or check cannot
-overwrite a concurrent pause, drop, or abandon. `restart-action` reissues
-pending work without changing a gate. `answer` consumes one typed pending
+overwrite a concurrent pause, drop, or abandon. `restart-action` reissues pending work without changing a gate. On restart, any persisted
+round-3 revision-limit or escalation question with complete terminal evidence is cleared under
+the state lock to derive the terminal decision directly. `answer` consumes one typed pending
 question, is idempotent for the same answer, and cannot create round 4.
 `abandon` stops the workflow while retaining its audit state.
 

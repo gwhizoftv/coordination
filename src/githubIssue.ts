@@ -1,5 +1,9 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import { sha256 } from "./hash.js";
+
+export const stableFilingKey = (issueSessionId: string, agent: string, revisionSha: string): string =>
+  `coord:follow-up:${sha256(`follow-up-key:${issueSessionId}:${agent}:${revisionSha}`)}`;
 
 export type CommandResult = { exitCode: number; stdout: string; stderr: string };
 export type CommandRunner = (argv: readonly string[], cwd: string) => Promise<CommandResult>;
@@ -64,6 +68,8 @@ export const formatFinalizationPullRequest = (input: {
   draft: boolean;
   evidenceBranch?: string | null;
   evidenceTip?: string | null;
+  closeoutReason?: string | null;
+  followUpIssues?: readonly { agent: string; issue: number; url: string }[] | null;
 }): { title: string; body: string } => {
   const issueTitle = input.title.trim() === "" ? "coordinated implementation" : input.title.trim();
   const lines = [
@@ -73,6 +79,15 @@ export const formatFinalizationPullRequest = (input: {
       ? `Draft PR for issue ${input.issue}. Owner merges. Final pin: ${input.finalSha}.`
       : `PR for issue ${input.issue}. Coordinator merges. Final pin: ${input.finalSha}.`
   ];
+  if (input.closeoutReason !== undefined && input.closeoutReason !== null && input.closeoutReason !== "") {
+    lines.push("", `Conclusion: ${input.closeoutReason}.`);
+  }
+  if (input.followUpIssues !== undefined && input.followUpIssues !== null && input.followUpIssues.length > 0) {
+    lines.push("", "Follow-up issues filed by objecting agents:");
+    for (const item of input.followUpIssues) {
+      lines.push(`- ${item.agent}: #${item.issue} (${item.url})`);
+    }
+  }
   if (input.evidenceBranch !== undefined && input.evidenceBranch !== null && input.evidenceBranch !== "") {
     lines.push(
       "",
@@ -165,4 +180,55 @@ export const fetchGitHubIssue = async (input: {
     );
   }
   return { repository, ...parsed.data };
+};
+
+export type VerifyFollowUpResult =
+  | { ok: true; issue: number; url: string; title: string }
+  | { ok: false; retry: boolean; error: string };
+
+export const verifyFollowUpIssue = async (input: {
+  origin: string;
+  concludingIssue: number;
+  agent: string;
+  revisionSha: string;
+  stableKey: string;
+  followUpUrl: string;
+  cwd: string;
+  runner: CommandRunner;
+}): Promise<VerifyFollowUpResult> => {
+  const repository = githubRepositoryFromOrigin(input.origin);
+  if (repository === null) {
+    return { ok: false, retry: false, error: `foreign repository URL or unsupported origin ${input.origin}` };
+  }
+  const match = new RegExp(`^https://github\\.com/${repository.replace("/", "\\/")}/issues/(\\d+)$`).exec(input.followUpUrl.trim());
+  if (match === null || match[1] === undefined) {
+    return { ok: false, retry: false, error: `follow-up issue URL ${input.followUpUrl} does not match repository ${repository}` };
+  }
+  const issueNumber = Number(match[1]);
+  if (issueNumber === input.concludingIssue) {
+    return { ok: false, retry: false, error: `follow-up issue cannot be concluding issue #${input.concludingIssue}` };
+  }
+  let snapshot: GitHubIssueSnapshot;
+  try {
+    snapshot = await fetchGitHubIssue({
+      origin: input.origin,
+      issue: issueNumber,
+      cwd: input.cwd,
+      runner: input.runner
+    });
+  } catch (error) {
+    return { ok: false, retry: true, error: `GitHub issue lookup failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const body = snapshot.body;
+  const backlink = `#${input.concludingIssue}`;
+  if (!body.includes(backlink) && !body.includes(`/issues/${input.concludingIssue}`)) {
+    return { ok: false, retry: false, error: `follow-up issue #${issueNumber} body is missing a backlink to #${input.concludingIssue}` };
+  }
+  if (!body.includes(input.revisionSha)) {
+    return { ok: false, retry: false, error: `follow-up issue #${issueNumber} body does not cite revision commit ${input.revisionSha}` };
+  }
+  if (!body.includes(input.stableKey)) {
+    return { ok: false, retry: false, error: `follow-up issue #${issueNumber} body does not cite stable filing key ${input.stableKey}` };
+  }
+  return { ok: true, issue: issueNumber, url: snapshot.url, title: snapshot.title };
 };

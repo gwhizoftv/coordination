@@ -731,4 +731,74 @@ Implement it.
       )
     ).toMatchObject({ status: "satisfied", productPin: artifact.revisedBranchHead });
   });
+
+  it("validates follow-up receipt artifacts and rejects mismatches", async () => {
+    const revSha = sha("d");
+    const input = {
+      kind: "revision",
+      agent: "codex",
+      commitSha: revSha,
+      path: ".signals/issue-1/revision-ready-codex-round-3.json"
+    };
+    const action = order({
+      stepId: "R6.follow-up",
+      evidenceId: "follow-up-published",
+      requiredPath: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      round: 3,
+      inputs: [input]
+    });
+    const validArtifact = {
+      protocolVersion: 1,
+      issue: 1,
+      issueSessionId: action.issueSessionId,
+      agent: "codex",
+      artifact: "follow-up-ready",
+      actionId: action.actionId,
+      inputSetHash: computeInputSetHash(action.inputs),
+      round: 3,
+      revisionCommitSha: revSha,
+      followUpIssueUrl: "https://github.com/example/project/issues/43"
+    };
+
+    const validResult = await evaluateEvidence(action, sha("e"), mirror(JSON.stringify(validArtifact)));
+    expect(validResult).toMatchObject({
+      status: "satisfied",
+      followUpUrl: "https://github.com/example/project/issues/43"
+    });
+
+    // Wrong actionId
+    const wrongAction = await evaluateEvidence(
+      action,
+      sha("e"),
+      mirror(JSON.stringify({ ...validArtifact, actionId: "10000000-0000-4000-8000-000000000001" }))
+    );
+    expect(wrongAction.status).toBe("rejected");
+    expect(wrongAction.outstanding).toContain("follow-up artifact actionId does not match the current action");
+
+    // Wrong round
+    const wrongRound = await evaluateEvidence(
+      action,
+      sha("e"),
+      mirror(JSON.stringify({ ...validArtifact, round: 2 }))
+    );
+    expect(wrongRound.status).toBe("rejected");
+
+    // Wrong revisionCommitSha
+    const wrongPin = await evaluateEvidence(
+      action,
+      sha("e"),
+      mirror(JSON.stringify({ ...validArtifact, revisionCommitSha: sha("f") }))
+    );
+    expect(wrongPin.status).toBe("rejected");
+    expect(wrongPin.outstanding).toContain("follow-up revisionCommitSha does not match the bound revision pin");
+
+    // Wrong inputSetHash
+    const wrongHash = await evaluateEvidence(
+      action,
+      sha("e"),
+      mirror(JSON.stringify({ ...validArtifact, inputSetHash: "0".repeat(64) }))
+    );
+    expect(wrongHash.status).toBe("rejected");
+    expect(wrongHash.outstanding).toContain("artifact inputSetHash does not match the bound action inputs");
+  });
 });

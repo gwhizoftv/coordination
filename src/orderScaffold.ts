@@ -1,4 +1,5 @@
 import { computeInputSetHash } from "./evidence.js";
+import { stableFilingKey } from "./githubIssue.js";
 import type { BoundInput, WorkflowStepId } from "./steps.js";
 
 export type ArtifactScaffoldContext = {
@@ -78,6 +79,15 @@ export const artifactScaffoldValue = (ctx: ArtifactScaffoldContext): Record<stri
         actionId: ctx.actionId ?? "<action-uuid>",
         disposition: "approve",
         rationale: "<one sentence>"
+      };
+    case "R6.follow-up":
+      return {
+        ...withHash(ctx),
+        artifact: "follow-up-ready",
+        actionId: ctx.actionId ?? "<action-uuid>",
+        round: 3,
+        revisionCommitSha: ctx.inputs.find((input) => input.kind === "revision")?.commitSha ?? PLACEHOLDER_SHA,
+        followUpIssueUrl: "https://github.com/<owner>/<repo>/issues/<number>"
       };
     case "R7.finalize":
       return {
@@ -173,5 +183,21 @@ export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => 
         scopeHash: ctx.scopeHash, explanation: "<discovered omission>",
         additionalPaths: [{ path: "<exact-product-file-path>", reason: "<why the original plan needs this file>" }] }, null, 2) + "\n```"
     : "";
-  return preamble + "```json\n" + `${json}\n` + "```" + request;
+  const revSha = ctx.inputs.find((i) => i.kind === "revision")?.commitSha ?? PLACEHOLDER_SHA;
+  const followUpKey = stableFilingKey(ctx.issueSessionId, ctx.agent, revSha);
+  const followUpInstructions = ctx.stepId === "R6.follow-up"
+    ? "\n\nInstructions for filing the follow-up issue:\n" +
+      "1. Search all issue states in the repository for the stable filing key before creating a new issue:\n" +
+      `   \`gh issue list --state all --search '${followUpKey}'\`\n` +
+      "   If a matching issue already exists, reuse its URL.\n" +
+      "2. File one new GitHub issue containing all of your remaining objections:\n" +
+      "   - Descriptive title summarizing the objections\n" +
+      "   - Concrete failures and expected behavior\n" +
+      `   - Explicit non-closing backlink to the concluding issue: #${ctx.issue}\n` +
+      `   - Cite the final revision commit SHA: ${revSha}\n` +
+      `   - Cite the stable filing key for deduplication: ${followUpKey}\n` +
+      "   - Use a body file for multiline issue content (`gh issue create --body-file ...`). Search before creating again if the result is uncertain.\n" +
+      "3. Write only this follow-up-ready receipt to the required path, commit, push, and submit its commit SHA.\n"
+    : "";
+  return preamble + "```json\n" + `${json}\n` + "```" + request + followUpInstructions;
 };

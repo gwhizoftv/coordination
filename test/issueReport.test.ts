@@ -213,4 +213,45 @@ describe("issue report", () => {
     expect(text).toContain("--coord-runtime '/runtime space/owner'\"'\"'s'");
     expect(text).toMatch(/Active step: .*\nActive roster: cursor\nQueued guidance: 0\n==== end coord status: issue 1 ====\n$/);
   });
+
+  it("reports revision-limit consensus conclusion, follow-up links, and pending filing work", () => {
+    const cursors = complete();
+    cursors.derived.consensus = {
+      kind: "consensus",
+      algorithm: "revision-limit-active-roster-v1",
+      inputSetHash: "c".repeat(64),
+      activeRoster: ["cursor", "codex"],
+      inputs: [],
+      decisionId: `consensus:${"c".repeat(64)}:r3`,
+      supersedes: null,
+      decidedAt: "2026-08-13T00:00:00.000Z",
+      round: 3,
+      consensusPin: pin,
+      objectors: ["codex"]
+    };
+    cursors.activeRoster = ["cursor", "codex"];
+    cursors.issueCursor = { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 };
+    cursors.completed = false;
+
+    // With codex pending
+    let text = renderIssueReport(start("coord-open-unmerged"), cursors);
+    expect(text).toContain("Consensus: concluded at third revision limit with unresolved objections.");
+    expect(text).toContain("Follow-up issues pending: codex");
+    expect(text).toContain("Active step: filing follow-up issues");
+
+    // With codex completed
+    cursors.accepted.push({
+      stepId: "R6.follow-up",
+      agent: "codex",
+      round: 3,
+      submissionSha: "e".repeat(40),
+      path: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      acceptedAt: "2026-08-13T00:00:00.000Z",
+      followUpIssue: 43,
+      followUpUrl: "https://github.com/example/project/issues/43"
+    });
+    text = renderIssueReport(start("coord-open-unmerged"), cursors);
+    expect(text).not.toContain("Follow-up issues pending:");
+    expect(text).toContain("Follow-up issues:\n  - codex: #43 https://github.com/example/project/issues/43");
+  });
 });

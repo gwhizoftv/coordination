@@ -27,6 +27,7 @@ const globalOrder: readonly WorkflowStepId[] = [
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ];
 
@@ -38,6 +39,7 @@ const normalizeCurrentStep = (
   current: WorkflowStepId,
   profile: WorkflowProfile
 ): WorkflowStepId | null => {
+  if (current === "R6.follow-up") return current;
   const sequence = stepsForProfile(profile);
   if (sequence.includes(current)) return current;
   const currentRank = globalOrder.indexOf(current);
@@ -187,7 +189,14 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
       (cursors.agents[agent]?.actionId === null || cursors.agents[agent]?.stepId !== "R4.amend-ballot"))
       .map((agent) => ({ type: "prepare-action", agent, stepId: "R4.amend-ballot", round }));
   }
-  if (cursors.ownerQuestion !== null) {
+  const isObsoleteTerminalQuestion =
+    cursors.ownerQuestion !== null &&
+    cursors.ownerQuestion.round === start.maxRevisionRounds &&
+    (cursors.ownerQuestion.kind === "revision-limit" || cursors.ownerQuestion.kind === "ballot-escalation") &&
+    hasPublishedBatch(cursors, "R6.ballot", cursors.ownerQuestion.round) &&
+    cursors.activeRoster.every((agent) => hasResponse(cursors, "R6.ballot", agent, cursors.ownerQuestion!.round));
+
+  if (!isObsoleteTerminalQuestion && cursors.ownerQuestion !== null) {
     return [
       {
         type: "owner-action-required",
@@ -230,6 +239,29 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
     return [{ type: "wait", reason: "canonical plan selection is missing or stale" }];
   }
 
+  if (current === "R6.follow-up") {
+    const consensus = cursors.derived.consensus;
+    if (consensus === null || !sameRoster(consensus.activeRoster, cursors.activeRoster)) {
+      return [{ type: "wait", reason: "canonical consensus decision is missing or stale" }];
+    }
+    const objectors = consensus.algorithm === "revision-limit-active-roster-v1"
+      ? consensus.objectors.filter((agent) => cursors.activeRoster.includes(agent))
+      : [];
+    const followUpComplete = objectors.every((agent) => hasAccepted(cursors, "R6.follow-up", agent, 3));
+    if (followUpComplete) {
+      return [{ type: "advance-step", from: current, to: "R7.finalize", round: null }];
+    }
+    for (const agent of objectors) {
+      if (hasAccepted(cursors, "R6.follow-up", agent, 3)) continue;
+      const cursor = cursors.agents[agent];
+      if (cursor === undefined || cursor.status === "dropped") continue;
+      if (cursor.actionId === null || cursor.stepId !== "R6.follow-up") {
+        decisions.push({ type: "prepare-action", agent, stepId: "R6.follow-up", round: 3 });
+      }
+    }
+    return decisions.length > 0 ? decisions : [{ type: "wait", reason: "waiting for gate-6-consensus" }];
+  }
+
   const designated =
     current === "R4.implement"
       ? profile === "solo"
@@ -267,6 +299,15 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
       const ballots = cursors.acceptedResponses.filter(
         (response) => response.stepId === current && response.round === round && participants.includes(response.agent)
       );
+      if ((round ?? 1) >= start.maxRevisionRounds) {
+        if (needsConsensusDerive(cursors, round ?? 1)) {
+          return [{ type: "derive-consensus", round: round ?? 1 }];
+        }
+        const consensus = cursors.derived.consensus;
+        const to = consensus?.algorithm === "revision-limit-active-roster-v1" ? "R6.follow-up" : "R7.finalize";
+        const nextRound = to === "R6.follow-up" ? 3 : null;
+        return [{ type: "advance-step", from: current, to, round: nextRound }];
+      }
       if (ballots.some((ballot) => ballot.disposition === "escalate")) {
         const currentRound = round ?? 1;
         return [
@@ -281,17 +322,6 @@ export const decide = (input: MachineInput): readonly MachineDecision[] => {
         ];
       }
       if (ballots.some((ballot) => ballot.disposition === "revise")) {
-        if ((round ?? 1) >= start.maxRevisionRounds) {
-          return [
-            {
-              type: "owner-action-required",
-              reason: `revision limit ${start.maxRevisionRounds} reached; round ${start.maxRevisionRounds + 1} is forbidden`,
-              kind: "revision-limit",
-              round: start.maxRevisionRounds,
-              allowedAnswers: ["retry", "abandon"]
-            }
-          ];
-        }
         return [{ type: "advance-step", from: current, to: "R6.revise", round: (round ?? 1) + 1 }];
       }
       if (needsConsensusDerive(cursors, round ?? 1)) {

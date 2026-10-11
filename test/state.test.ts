@@ -391,6 +391,48 @@ describe("derived decision state", () => {
     };
     expect(consensusDerivedSchema.safeParse(value).success).toBe(false);
   });
+
+  it("validates strict revision-limit consensus derived schema", () => {
+    const validRevisionLimit = {
+      ...base,
+      kind: "consensus" as const,
+      algorithm: "revision-limit-active-roster-v1" as const,
+      decisionId: `consensus:${inputSetHash}:r3`,
+      round: 3 as const,
+      consensusPin: "b".repeat(40),
+      objectors: ["claude"]
+    };
+    expect(consensusDerivedSchema.safeParse(validRevisionLimit).success).toBe(true);
+
+    // Round must be 3
+    expect(
+      consensusDerivedSchema.safeParse({
+        ...validRevisionLimit,
+        round: 2,
+        decisionId: `consensus:${inputSetHash}:r2`
+      }).success
+    ).toBe(false);
+
+    // Objectors must be non-empty
+    expect(
+      consensusDerivedSchema.safeParse({
+        ...validRevisionLimit,
+        objectors: []
+      }).success
+    ).toBe(false);
+
+    // Unanimous cannot have objectors
+    const unanimousWithObjectors = {
+      ...base,
+      kind: "consensus" as const,
+      algorithm: "unanimous-active-roster-v1" as const,
+      decisionId: `consensus:${inputSetHash}:r3`,
+      round: 3,
+      consensusPin: "b".repeat(40),
+      objectors: ["claude"]
+    };
+    expect(consensusDerivedSchema.safeParse(unanimousWithObjectors).success).toBe(false);
+  });
 });
 
 const configFixture = (contextPaths?: unknown) => ({

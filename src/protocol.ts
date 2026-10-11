@@ -197,6 +197,18 @@ export const finalizationArtifactSchema = z
   })
   .strict();
 
+export const followUpReadyArtifactSchema = z
+  .object({
+    ...commonArtifactFields,
+    artifact: z.literal("follow-up-ready"),
+    actionId: actionIdSchema,
+    inputSetHash: digestSchema,
+    round: z.literal(3),
+    revisionCommitSha: gitShaSchema,
+    followUpIssueUrl: z.string().url()
+  })
+  .strict();
+
 export const publishedArtifactSchema = z.discriminatedUnion("artifact", [
   participationReadyArtifactSchema,
   planBallotArtifactSchema,
@@ -206,7 +218,8 @@ export const publishedArtifactSchema = z.discriminatedUnion("artifact", [
   consensusBallotArtifactSchema,
   finalizationArtifactSchema,
   planAmendmentRequestSchema,
-  amendmentBallotArtifactSchema
+  amendmentBallotArtifactSchema,
+  followUpReadyArtifactSchema
 ]);
 
 export type ParticipationReadyArtifact = z.infer<typeof participationReadyArtifactSchema>;
@@ -217,6 +230,7 @@ export type ImplementationReadyArtifact = z.infer<typeof implementationReadyArti
 export type ComparisonBallotArtifact = z.infer<typeof comparisonBallotArtifactSchema>;
 export type RevisionReadyArtifact = z.infer<typeof revisionReadyArtifactSchema>;
 export type ConsensusBallotArtifact = z.infer<typeof consensusBallotArtifactSchema>;
+export type FollowUpReadyArtifact = z.infer<typeof followUpReadyArtifactSchema>;
 export type FinalizationArtifact = z.infer<typeof finalizationArtifactSchema>;
 export type PublishedArtifact = z.infer<typeof publishedArtifactSchema>;
 

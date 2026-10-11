@@ -184,4 +184,41 @@ describe("orderScaffold", () => {
         .map((definition) => definition.id)
     ).toEqual(["R2.plan", "R4.implement", "R6.revise"]);
   });
+
+  it("renders a filled follow-up receipt and actionable issue-filing instructions for R6.follow-up", () => {
+    const revSha = "e".repeat(40);
+    const ctx = {
+      stepId: "R6.follow-up" as const,
+      issue: 42,
+      issueSessionId: "issue-42:sess",
+      agent: "codex",
+      baselineSha: "a".repeat(40),
+      automationDigest: "b".repeat(64),
+      inputs: [{ kind: "revision" as const, agent: "antigravity", commitSha: revSha, path: ".signals/issue-42/revision-ready-antigravity-round-3.json" }],
+      eligibleChoices: [],
+      round: 3,
+      approvedPaths: [],
+      actionId: "b2337d85-6617-4e9f-8ace-901453764aa4"
+    };
+    const scaffold = artifactScaffoldValue(ctx);
+    expect(scaffold).toMatchObject({
+      protocolVersion: 1,
+      issue: 42,
+      issueSessionId: "issue-42:sess",
+      agent: "codex",
+      artifact: "follow-up-ready",
+      actionId: "b2337d85-6617-4e9f-8ace-901453764aa4",
+      round: 3,
+      revisionCommitSha: revSha,
+      followUpIssueUrl: "https://github.com/<owner>/<repo>/issues/<number>"
+    });
+
+    const rendered = renderArtifactScaffold(ctx);
+    expect(rendered).toContain("File one new GitHub issue");
+    expect(rendered).toContain("Search before creating");
+    expect(rendered).toContain(revSha);
+    expect(rendered).toContain("#42");
+    expect(rendered).toContain("coord:follow-up:");
+    expect(rendered).toContain('"artifact": "follow-up-ready"');
+  });
 });

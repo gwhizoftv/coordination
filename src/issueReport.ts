@@ -11,7 +11,8 @@ const stageNames: Record<WorkflowStepId, string> = {
   "R1.join": "checking agent readiness", "R2.plan": "writing plans", "R3.review": "reviewing plans",
   "R3.plan-ballot": "choosing a plan", "R4.implement": "implementing", "R4.amend-ballot": "reviewing scope changes",
   "R5.compare": "reviewing implementations", "R5.compare-ballot": "choosing an implementation",
-  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R7.finalize": "finalizing"
+  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R6.follow-up": "filing follow-up issues",
+  "R7.finalize": "finalizing"
 };
 
 export const holdDescription = (reason: CursorsState["holds"][number]["reason"]): string => ({
@@ -94,6 +95,33 @@ export const renderIssueReport = (
     `Final commit (PR head): ${pin ?? "(none)"}`,
     `Published branch: ${branch ?? "(not pushed yet)"}`
   ];
+  if (cursors.derived.consensus !== null) {
+    if (cursors.derived.consensus.algorithm === "revision-limit-active-roster-v1") {
+      lines.push("Consensus: concluded at third revision limit with unresolved objections.");
+    } else {
+      lines.push("Consensus: unanimous approval.");
+    }
+  }
+  const followUpSubmissions = cursors.accepted.filter(
+    (s) => s.stepId === "R6.follow-up" && s.followUpUrl !== undefined
+  );
+  if (followUpSubmissions.length > 0) {
+    lines.push("Follow-up issues:");
+    for (const item of followUpSubmissions) {
+      lines.push(`  - ${item.agent}: ${item.followUpIssue !== undefined ? `#${item.followUpIssue} ` : ""}${item.followUpUrl}`);
+    }
+  }
+  if (cursors.issueCursor.stepId === "R6.follow-up") {
+    const objectors = cursors.derived.consensus?.algorithm === "revision-limit-active-roster-v1"
+      ? cursors.derived.consensus.objectors
+      : [];
+    const pendingFiling = objectors.filter(
+      (agent) => !cursors.accepted.some((s) => s.stepId === "R6.follow-up" && s.agent === agent)
+    );
+    if (pendingFiling.length > 0) {
+      lines.push(`Follow-up issues pending: ${pendingFiling.join(", ")}`);
+    }
+  }
   if (cursors.manualPaused) lines.push(`Manual pause: active (${issueCommand("resume", start.issue, start.coordRoot)} clears only this pause).`);
   for (const hold of cursors.holds) {
     const sends = cursors.actionSafety[hold.agent]?.sends ?? 0;

@@ -113,7 +113,13 @@ import {
 import { containmentPolicy, ingestContainmentProbe } from "./shellGuard.js";
 import { holdRecoveryCommand, holdDescription, issueCommand, renderIssueReport } from "./issueReport.js";
 import { inspectStartupAgent } from "./doctor.js";
-import { formatFinalizationPullRequest, githubRepositoryFromOrigin, readGitHubIssueSnapshot } from "./githubIssue.js";
+import {
+  formatFinalizationPullRequest,
+  githubRepositoryFromOrigin,
+  readGitHubIssueSnapshot,
+  stableFilingKey,
+  verifyFollowUpIssue
+} from "./githubIssue.js";
 import { prepareAgentIssueBranches } from "./prepareAgentBranch.js";
 import { harnessPromptReadiness, TmuxController, type IdleOverride } from "./tmux.js";
 import { sha256, sha256OfFile } from "./hash.js";
@@ -265,16 +271,23 @@ const publishedBallotBatch = (
       if (
         batch.kind !== kind ||
         batch.round !== round ||
-        batch.status !== "published" ||
-        batch.activeRoster.length !== cursors.activeRoster.length ||
-        !batch.activeRoster.every((agent, index) => agent === cursors.activeRoster[index])
+        batch.status !== "published"
       ) {
         return false;
       }
-      if (batch.responses.length !== closed.length) return false;
-      return cursors.activeRoster.every((agent, index) => {
+      const rosterMatchesExact =
+        batch.activeRoster.length === cursors.activeRoster.length &&
+        batch.activeRoster.every((agent, index) => agent === cursors.activeRoster[index]);
+      const rosterCoversCurrent =
+        stepId === "R6.ballot" &&
+        round === 3 &&
+        cursors.activeRoster.every((agent) => batch.activeRoster.includes(agent));
+      if (!rosterMatchesExact && !rosterCoversCurrent) {
+        return false;
+      }
+      return cursors.activeRoster.every((agent) => {
         const response = closed.find((candidate) => candidate.agent === agent);
-        const entry = batch.responses[index];
+        const entry = batch.responses.find((candidate) => candidate.agent === agent);
         return (
           response !== undefined &&
           entry !== undefined &&
@@ -362,7 +375,7 @@ const canonicalDerivedCitation = (citation: DerivedInputCitation): string =>
  * can alias another decision.
  */
 export const computeDerivedInputSetHash = (
-  kind: "plan-selection" | "implementation-selection" | "consensus",
+  kind: "plan-selection" | "implementation-selection" | "consensus" | "consensus:revision-limit",
   activeRoster: readonly string[],
   inputs: readonly DerivedInputCitation[],
   round?: number | null
@@ -485,7 +498,7 @@ export const computeConsensusDerived = (
   );
   if (revision?.productPin === undefined) return null;
   const ballots = acceptedResponsesAt(cursors, "R6.ballot", true, round);
-  if (!hasCompleteActiveDenominator(cursors, ballots) || ballots.some((ballot) => ballot.disposition !== "approve")) {
+  if (!hasCompleteActiveDenominator(cursors, ballots)) {
     return null;
   }
   const batch = publishedBallotBatch(cursors, "R6.ballot", round);
@@ -494,19 +507,43 @@ export const computeConsensusDerived = (
     submissionCitation(revision, "revision"),
     ...ballots.map((response) => responseCitation(response, "consensus-ballot", batch))
   ];
-  const inputSetHash = computeDerivedInputSetHash("consensus", cursors.activeRoster, inputs, round);
-  return {
-    kind: "consensus",
-    algorithm: "unanimous-active-roster-v1",
-    inputSetHash,
-    activeRoster: [...cursors.activeRoster],
-    inputs,
-    decisionId: deriveDecisionId("consensus", inputSetHash, round),
-    supersedes,
-    decidedAt: now,
-    round,
-    consensusPin: revision.productPin
-  };
+  if (ballots.every((ballot) => ballot.disposition === "approve")) {
+    const inputSetHash = computeDerivedInputSetHash("consensus", cursors.activeRoster, inputs, round);
+    return {
+      kind: "consensus",
+      algorithm: "unanimous-active-roster-v1",
+      inputSetHash,
+      activeRoster: [...cursors.activeRoster],
+      inputs,
+      decisionId: deriveDecisionId("consensus", inputSetHash, round),
+      supersedes,
+      decidedAt: now,
+      round,
+      consensusPin: revision.productPin
+    };
+  }
+  if (round === 3) {
+    const objectors = cursors.activeRoster.filter((agent) =>
+      ballots.some((ballot) => ballot.agent === agent && ballot.disposition !== "approve")
+    );
+    if (objectors.length > 0) {
+      const inputSetHash = computeDerivedInputSetHash("consensus:revision-limit", cursors.activeRoster, inputs, round);
+      return {
+        kind: "consensus",
+        algorithm: "revision-limit-active-roster-v1",
+        inputSetHash,
+        activeRoster: [...cursors.activeRoster],
+        inputs,
+        decisionId: deriveDecisionId("consensus", inputSetHash, round),
+        supersedes,
+        decidedAt: now,
+        round: 3,
+        consensusPin: revision.productPin,
+        objectors
+      };
+    }
+  }
+  return null;
 };
 
 type DerivedDecisionRecord = PlanSelectionDerived | ImplementationSelectionDerived | ConsensusDerived;
@@ -527,7 +564,11 @@ export const derivedDecisionJournalDetails = (record: DerivedDecisionRecord): Re
           implementationPin: record.implementationPin,
           reviser: record.reviser
         }
-      : { round: record.round, consensusPin: record.consensusPin })
+      : {
+          round: record.round,
+          consensusPin: record.consensusPin,
+          ...(record.algorithm === "revision-limit-active-roster-v1" ? { objectors: [...record.objectors] } : {})
+        })
 });
 
 export const deriveBoundInputs = (
@@ -579,8 +620,8 @@ export const deriveBoundInputs = (
     );
     return selected === undefined ? [] : [inputFromSubmission(selected, "implementation", true)];
   }
-  if (stepId === "R6.ballot") {
-    return acceptedAt(cursors, "R6.revise", true, round).map((value) => inputFromSubmission(value, "revision", true));
+  if (stepId === "R6.ballot" || stepId === "R6.follow-up") {
+    return acceptedAt(cursors, "R6.revise", true, round ?? 3).map((value) => inputFromSubmission(value, "revision", true));
   }
   if (stepId === "R7.finalize") {
     const consensus = cursors.derived.consensus;
@@ -1940,7 +1981,9 @@ export class CoordinatorRunLoop {
       ...(decision.choice === undefined ? {} : { choice: decision.choice }),
       ...(decision.checkResults === undefined
         ? {}
-        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) })
+        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) }),
+      ...(decision.followUpIssue === undefined ? {} : { followUpIssue: decision.followUpIssue }),
+      ...(decision.followUpUrl === undefined ? {} : { followUpUrl: decision.followUpUrl })
     };
     const withoutPrior = cursors.accepted.filter(
       (item) => !(item.stepId === accepted.stepId && item.agent === accepted.agent && item.round === accepted.round)
@@ -2562,6 +2605,48 @@ export class CoordinatorRunLoop {
     });
   }
 
+  async verifyFollowUpSubmission(
+    start: StartState,
+    order: InternalOrder,
+    observation: EvidenceObservation
+  ): Promise<EvidenceObservation> {
+    if (order.stepId !== "R6.follow-up" || observation.status !== "satisfied" || observation.followUpUrl === undefined) {
+      return observation;
+    }
+    const revisionInput = order.inputs.find((input) => input.kind === "revision");
+    const revisionSha = revisionInput?.commitSha ?? "";
+    const key = stableFilingKey(start.issueSessionId, order.agent, revisionSha);
+    const verified = await verifyFollowUpIssue({
+      origin: start.origin,
+      concludingIssue: start.issue,
+      agent: order.agent,
+      revisionSha,
+      stableKey: key,
+      followUpUrl: observation.followUpUrl,
+      cwd: this.paths.issueRoot,
+      runner: this.processRunner
+    });
+    if (verified.ok) {
+      return {
+        ...observation,
+        followUpIssue: verified.issue,
+        followUpUrl: verified.url
+      };
+    }
+    if (verified.retry) {
+      return {
+        ...observation,
+        status: "retry",
+        outstanding: [verified.error]
+      };
+    }
+    return {
+      ...observation,
+      status: "rejected",
+      outstanding: [verified.error]
+    };
+  }
+
   async verifyFinalizationChecks(
     start: StartState,
     order: InternalOrder,
@@ -2682,13 +2767,29 @@ export class CoordinatorRunLoop {
       this.log(`[OK] Final branch ${branch} pushed.`);
       this.authority(authority, true);
       const draft = !coordMergesPullRequest(start.prPolicy);
+      const isRevisionLimit = cursors.derived.consensus?.algorithm === "revision-limit-active-roster-v1";
+      const followUpSubmissions = acceptedAt(cursors, "R6.follow-up");
+      const followUpIssues = isRevisionLimit
+        ? followUpSubmissions
+            .filter((s) => s.followUpIssue !== undefined && s.followUpUrl !== undefined)
+            .map((s) => ({
+              agent: s.agent,
+              issue: s.followUpIssue!,
+              url: s.followUpUrl!
+            }))
+        : undefined;
+      const closeoutReason = isRevisionLimit
+        ? "Concluded development at the third revision limit with unresolved objections."
+        : undefined;
       const { title, body } = formatFinalizationPullRequest({
         issue: start.issue,
         title: issueSnapshot.title,
         finalSha,
         draft,
         evidenceBranch: cursors.evidence.branch,
-        evidenceTip: cursors.evidence.tip
+        evidenceTip: cursors.evidence.tip,
+        ...(closeoutReason !== undefined ? { closeoutReason } : {}),
+        ...(followUpIssues !== undefined && followUpIssues.length > 0 ? { followUpIssues } : {})
       });
       this.log("[WAIT] Opening the pull request...");
       const result = await this.pullRequestOpener({
@@ -2838,17 +2939,27 @@ export class CoordinatorRunLoop {
   }
 
   private applyDerivedConsensus(start: StartState, cursors: CursorsState, round: number): CursorsState {
+    const derived = computeConsensusDerived(cursors, round, this.now());
+    const transition =
+      derived?.algorithm === "revision-limit-active-roster-v1"
+        ? ({
+            type: "advance-step" as const,
+            from: "R6.ballot" as const,
+            to: "R6.follow-up" as const,
+            round: 3
+          } as const)
+        : ({
+            type: "advance-step" as const,
+            from: "R6.ballot" as const,
+            to: "R7.finalize" as const,
+            round: null
+          } as const);
     return this.persistDerivedDecision(
       start,
       cursors,
       "consensus",
       (current, now, supersedes) => computeConsensusDerived(current, round, now, supersedes),
-      {
-      type: "advance-step",
-      from: "R6.ballot",
-      to: "R7.finalize",
-      round: null
-      }
+      transition
     );
   }
 
@@ -2963,6 +3074,18 @@ export class CoordinatorRunLoop {
       // A pause can be released after run() skips initialization but before
       // this read. Keep that poll effect-free until initialization succeeds.
       if (options.observeOnly === true) return cursors;
+      if (
+        cursors.ownerQuestion !== null &&
+        cursors.ownerQuestion.round === start.maxRevisionRounds &&
+        (cursors.ownerQuestion.kind === "revision-limit" || cursors.ownerQuestion.kind === "ballot-escalation") &&
+        publishedBallotBatch(cursors, "R6.ballot", cursors.ownerQuestion.round) !== null
+      ) {
+        cursors = this.mutate(cursors, (current) => cursorsStateSchema.parse({
+          ...current,
+          ownerQuestion: null,
+          updatedAt: this.now()
+        }));
+      }
       cursors = this.retireAmendmentActions(cursors);
       const observations: EvidenceObservation[] = [];
 
@@ -3134,6 +3257,8 @@ export class CoordinatorRunLoop {
       let observation = await evaluateEvidence(order, completion.sha, this.mirror as EvidenceMirror, () =>
         this.authority(cursors)
       );
+      this.authority(cursors);
+      observation = await this.verifyFollowUpSubmission(start, order, observation);
       this.authority(cursors);
       observation = await this.verifyFinalizationChecks(start, order, observation, cursors);
       this.authority(cursors);

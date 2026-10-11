@@ -20,6 +20,7 @@ export type EvidenceId =
   | "comparison-response-accepted"
   | "revision-pinned"
   | "consensus-response-accepted"
+  | "follow-up-published"
   | "finalization-verified";
 
 export type WorkflowStepId =
@@ -33,6 +34,7 @@ export type WorkflowStepId =
   | "R5.compare-ballot"
   | "R6.revise"
   | "R6.ballot"
+  | "R6.follow-up"
   | "R7.finalize";
 
 export type GateId =
@@ -69,7 +71,7 @@ export type StepDefinition = {
   id: WorkflowStepId;
   gateId: GateId;
   evidenceId: EvidenceId;
-  participants: "all" | "implementer" | "reviser";
+  participants: "all" | "implementer" | "reviser" | "objectors";
   submissionMode: "git" | "response";
   /**
    * Git steps: repository-relative artifact path the agent must publish.
@@ -182,6 +184,15 @@ export const STEP_DEFINITIONS: Readonly<Record<WorkflowStepId, StepDefinition>> 
       `.code-reviews/issue-${issue}/consensus-ballot-${agent}-round-${round ?? 1}.json`,
     task: "Submit a consensus ballot judgment as a private response with your disposition and rationale. Do not commit or push."
   },
+  "R6.follow-up": {
+    id: "R6.follow-up",
+    gateId: "gate-6-consensus",
+    evidenceId: "follow-up-published",
+    participants: "objectors",
+    submissionMode: "git",
+    requiredPath: (issue, agent) => `.signals/issue-${issue}/follow-up-ready-${agent}-round-3.json`,
+    task: "File a GitHub follow-up issue containing your remaining objections, cite the final revision and concluding issue, and publish the follow-up readiness signal."
+  },
   "R7.finalize": {
     id: "R7.finalize",
     gateId: "gate-7-finalized",
@@ -200,7 +211,11 @@ export const describeWorkflowStep = (stepId: WorkflowStepId | null, round: numbe
 
 /** Amendment sequence numbers never consume product revision rounds. */
 export const roundForStep = (stepId: WorkflowStepId, round: number | null): number | null =>
-  stepId.startsWith("R6.") || stepId === "R4.amend-ballot" ? (round ?? 1) : null;
+  stepId === "R6.follow-up"
+    ? 3
+    : stepId.startsWith("R6.") || stepId === "R4.amend-ballot"
+      ? (round ?? 1)
+      : null;
 
 export type BallotStepId = "R3.plan-ballot" | "R5.compare-ballot" | "R6.ballot" | "R4.amend-ballot";
 export const isBallotStep = (stepId: WorkflowStepId): stepId is BallotStepId =>
@@ -240,10 +255,16 @@ export const participantsForStep = (
   stepId: WorkflowStepId,
   profile: WorkflowProfile,
   activeRoster: readonly string[],
-  reviser?: string
+  reviser?: string,
+  objectors?: readonly string[]
 ): readonly string[] => {
   const step = STEP_DEFINITIONS[stepId];
   if (activeRoster.length === 0) return [];
+  if (step.participants === "objectors") {
+    return objectors !== undefined
+      ? objectors.filter((agent) => activeRoster.includes(agent))
+      : activeRoster;
+  }
   if (step.participants === "all") return activeRoster;
   const designated = reviser !== undefined && activeRoster.includes(reviser) ? reviser : activeRoster[0] as string;
   if (step.participants === "reviser") return [designated];
@@ -388,6 +409,8 @@ export type EvidenceObservation = {
   responseSha256?: string;
   rationale?: string;
   amendmentRequest?: PlanAmendmentRequest;
+  followUpIssue?: number;
+  followUpUrl?: string;
 };
 
 export type MachineDecision =
@@ -403,6 +426,8 @@ export type MachineDecision =
       approvedPaths?: readonly string[];
       choice?: string;
       checkResults?: readonly CheckResult[];
+      followUpIssue?: number;
+      followUpUrl?: string;
     }
   | {
       type: "accept-response";
