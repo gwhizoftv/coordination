@@ -192,7 +192,7 @@ const seedAcceptedSubmissions = (paths: ReturnType<typeof fixture>) => {
 };
 
 const everyStep = Object.keys(STEP_DEFINITIONS) as WorkflowStepId[];
-const roundOf = (stepId: WorkflowStepId): number | null => (stepId.startsWith("R6.") ? 1 : null);
+const roundOf = (stepId: WorkflowStepId): number | null => (stepId === "R6.follow-up" ? 3 : stepId.startsWith("R6.") ? 1 : null);
 
 const sampleChangeScope = [
   { agent: "claude", commitSha: "1".repeat(40), paths: ["src/steps.ts"], truncated: false }
@@ -328,14 +328,14 @@ describe("agent-facing language", () => {
   });
 
   it("covers every workflow step and every evidence id", () => {
-    expect(everyStep).toHaveLength(11);
+    expect(everyStep).toHaveLength(12);
     const subjects = new Set<string>();
     for (const stepId of everyStep) {
       const subject = agentFacingSubject(STEP_DEFINITIONS[stepId].evidenceId);
       expect(subject, stepId).toBeTruthy();
       subjects.add(subject);
     }
-    expect(subjects.size).toBe(11);
+    expect(subjects.size).toBe(12);
     for (const subject of agentFacingSubjects()) {
       expect(findAgentLanguageViolations(subject), subject).toEqual([]);
     }

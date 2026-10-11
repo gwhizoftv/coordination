@@ -732,3 +732,24 @@ Implement it.
     ).toMatchObject({ status: "satisfied", productPin: artifact.revisedBranchHead });
   });
 });
+
+
+describe("follow-up filing receipts", () => {
+  it("binds a receipt to this action, published ballot set and exact revision", async () => {
+    const action = order({ stepId: "R6.follow-up", evidenceId: "follow-up-published", round: 3,
+      requiredPath: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      inputs: [
+        { agent: "claude", kind: "revision", commitSha: sha("c"), path: ".signals/issue-1/revision.json" },
+        { agent: "codex", kind: "consensus-ballot", commitSha: sha("d"), path: ".code-reviews/issue-1/ballot.json" }
+      ] });
+    const receipt = { protocolVersion: 1, issue: 1, issueSessionId: action.issueSessionId, agent: "codex",
+      artifact: "follow-up-ready", actionId: action.actionId, inputSetHash: computeInputSetHash(action.inputs),
+      round: 3, revisionCommitSha: sha("c"), followUpIssueUrl: "https://github.com/acme/app/issues/2" };
+    expect(await evaluateEvidence(action, sha("f"), mirror(JSON.stringify(receipt))))
+      .toMatchObject({ status: "satisfied", followUpRequest: receipt });
+    for (const patch of [{ actionId: "10000000-0000-4000-8000-000000000001" }, { inputSetHash: "a".repeat(64) },
+      { issue: 2 }, { agent: "claude" }, { round: 2 }, { revisionCommitSha: sha("b") }, { issueSessionId: "old-session" }]) {
+      expect((await evaluateEvidence(action, sha("f"), mirror(JSON.stringify({ ...receipt, ...patch })))).status).toBe("rejected");
+    }
+  });
+});

@@ -214,3 +214,25 @@ describe("issue report", () => {
     expect(text).toMatch(/Active step: .*\nActive roster: cursor\nQueued guidance: 0\n==== end coord status: issue 1 ====\n$/);
   });
 });
+
+
+it("reports pending/filed follow-ups and authorized-reviser recovery without exposing private ballots", () => {
+  const cursors = complete();
+  cursors.completed = false;
+  cursors.issueCursor = { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 };
+  cursors.derived.consensus = { kind: "consensus", algorithm: "revision-limit-active-roster-v1", objectors: ["cursor"],
+    inputSetHash: "b".repeat(64), activeRoster: ["cursor"], inputs: cursors.derived.implementationSelection!.inputs,
+    decisionId: `consensus:${"b".repeat(64)}:r3`, supersedes: null, decidedAt: cursors.updatedAt, round: 3, consensusPin: pin };
+  cursors.droppedAgents = ["claude"];
+  let report = renderIssueReport(start("owner-only"), cursors);
+  expect(report).toContain("not unanimous approval");
+  expect(report).toContain("Follow-up pending: cursor");
+  expect(report).toContain("authorized reviser must remain active");
+  expect(report).not.toContain("drop cursor");
+  expect(report).toContain("historical objections are not approvals or filing receipts");
+  cursors.accepted.push({ stepId: "R6.follow-up", agent: "cursor", round: 3, submissionSha: "a".repeat(40), path: ".signals/receipt.json",
+    acceptedAt: cursors.updatedAt, followUp: { number: 2, url: "https://github.com/example/project/issues/2", revisionCommitSha: pin } });
+  report = renderIssueReport(start("owner-only"), cursors);
+  expect(report).toContain("Follow-up filed by cursor: https://github.com/example/project/issues/2");
+  expect(report).not.toContain("Follow-up pending");
+});

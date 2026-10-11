@@ -1,4 +1,4 @@
-import type { PlanAmendmentRequest } from "./protocol.js";
+import type { FollowUpEvidence, FollowUpIssueArtifact, PlanAmendmentRequest } from "./protocol.js";
 
 export const DEFAULT_MAX_REVISION_ROUNDS = 3;
 
@@ -19,6 +19,7 @@ export type EvidenceId =
   | "comparison-published"
   | "comparison-response-accepted"
   | "revision-pinned"
+  | "follow-up-published"
   | "consensus-response-accepted"
   | "finalization-verified";
 
@@ -32,6 +33,7 @@ export type WorkflowStepId =
   | "R5.compare"
   | "R5.compare-ballot"
   | "R6.revise"
+  | "R6.follow-up"
   | "R6.ballot"
   | "R7.finalize";
 
@@ -182,6 +184,15 @@ export const STEP_DEFINITIONS: Readonly<Record<WorkflowStepId, StepDefinition>> 
       `.code-reviews/issue-${issue}/consensus-ballot-${agent}-round-${round ?? 1}.json`,
     task: "Submit a consensus ballot judgment as a private response with your disposition and rationale. Do not commit or push."
   },
+  "R6.follow-up": {
+    id: "R6.follow-up",
+    gateId: "gate-6-consensus",
+    evidenceId: "follow-up-published",
+    participants: "all", // The machine selects only the sealed batch's objectors.
+    submissionMode: "git",
+    requiredPath: (issue, agent) => `.signals/issue-${issue}/follow-up-ready-${agent}-round-3.json`,
+    task: "File a linked GitHub issue for your remaining objections to the final revision, then publish only the filing receipt. Do not change product files."
+  },
   "R7.finalize": {
     id: "R7.finalize",
     gateId: "gate-7-finalized",
@@ -189,7 +200,7 @@ export const STEP_DEFINITIONS: Readonly<Record<WorkflowStepId, StepDefinition>> 
     participants: "reviser",
     submissionMode: "git",
     requiredPath: (issue, agent) => `.signals/issue-${issue}/finalization-ready-${agent}.json`,
-    task: "Finalize the consensus commit, remove only current-issue coordination files, and publish finalization evidence."
+    task: "Finalize the authorized revision, remove only current-issue coordination files, and publish finalization evidence."
   }
 };
 
@@ -216,6 +227,7 @@ const consensusSteps: readonly WorkflowStepId[] = [
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ];
 
@@ -388,6 +400,8 @@ export type EvidenceObservation = {
   responseSha256?: string;
   rationale?: string;
   amendmentRequest?: PlanAmendmentRequest;
+  followUpRequest?: FollowUpIssueArtifact;
+  followUp?: FollowUpEvidence;
 };
 
 export type MachineDecision =
@@ -403,6 +417,7 @@ export type MachineDecision =
       approvedPaths?: readonly string[];
       choice?: string;
       checkResults?: readonly CheckResult[];
+      followUp?: FollowUpEvidence;
     }
   | {
       type: "accept-response";
@@ -419,6 +434,7 @@ export type MachineDecision =
   | { type: "derive-plan-selection" }
   | { type: "derive-implementation-selection" }
   | { type: "derive-consensus"; round: number }
+  | { type: "retire-terminal-question"; questionId: string }
   | { type: "wait"; reason: string }
   | {
       type: "owner-action-required";

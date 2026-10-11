@@ -3,6 +3,7 @@ import { sha256 } from "./hash.js";
 import type { FetchResult } from "./mirror.js";
 import {
   finalizationArtifactSchema,
+  followUpIssueArtifactSchema,
   implementationReadyArtifactSchema,
   participationReadyArtifactSchema,
   planAmendmentRequestSchema,
@@ -375,6 +376,22 @@ export const evaluateEvidence = async (
     }
     return errors.length === 0
       ? satisfied(order, submissionSha, { productPin: parsed.value.revisedBranchHead })
+      : rejected(order, submissionSha, errors);
+  }
+
+  if (order.evidenceId === "follow-up-published") {
+    const parsed = parseJsonWithSchema(blob, followUpIssueArtifactSchema);
+    if (!parsed.ok) return rejected(order, submissionSha, [`invalid follow-up receipt: ${parsed.error}`]);
+    const receipt = parsed.value;
+    const errors = [...commonErrors(receipt, order), ...inputHashErrors(receipt.inputSetHash, order)];
+    if (receipt.actionId !== order.actionId) errors.push("follow-up receipt actionId does not match the current action");
+    if (receipt.round !== order.round) errors.push("follow-up receipt round does not match");
+    const revision = order.inputs.find((input) => input.kind === "revision");
+    if (revision?.commitSha !== receipt.revisionCommitSha) errors.push("follow-up receipt must cite the bound final revision");
+    if (!order.inputs.some((input) => input.kind === "consensus-ballot" && input.agent === order.agent)) {
+      errors.push("follow-up receipt needs your published final ballot");
+    }
+    return errors.length === 0 ? { ...satisfied(order, submissionSha), followUpRequest: receipt }
       : rejected(order, submissionSha, errors);
   }
 

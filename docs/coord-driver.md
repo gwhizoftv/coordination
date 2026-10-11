@@ -575,6 +575,43 @@ approved overlays apply only while the exact selected plan set is unchanged.
 No-amendment format-4 issues load with empty history and keep their ordinary
 workflow; no new owner command is required.
 
+## Concluding the third revision
+
+After the complete third-round ballot batch is published, both `revise` and
+`escalate` become recorded follow-up obligations. Earlier rounds retain their
+revision and owner-escalation behavior. A unanimous ballot goes straight to
+finalization; otherwise the decision is labeled `revision-limit-active-roster-v1`,
+not unanimous approval, and `R6.follow-up` orders only the active objectors.
+There is no fourth revision or same-pin retry vote at the limit.
+
+Each objector creates one issue for its remaining objections. The action gives
+the exact repository, non-closing parent backlink, final revision, and stable
+tracking key. Search all issue states for that key and reuse the matching
+filing on reissue or uncertain creation; use a body file for multiline issue
+text. Only after the private ballots are published is public filing authorized.
+The agent commits its filing receipt; the coordinator checks the remote issue
+and required backlink/revision/key, then retains its verified number and URL.
+Transient lookup failures retain the receipt for another verification attempt,
+not another issue creation. Missing or incorrectly linked issues need correction.
+
+After active objectors have filed, the authorized reviser performs the usual
+current-issue cleanup. Ancestry checks and the final suite still apply to the
+exact revision, classified from the frozen baseline. The PR describes the
+capped conclusion and links the follow-ups. The configured PR policy, including
+whether the coordinator merges, is unchanged. Failed checks cannot be deferred
+as objections. Status names outstanding filers; inspect access or a harness
+hold before using the existing owner recovery controls. Dropping an eligible
+non-reviser removes its active filing obligation but records it as dropped,
+not as having approved or filed; the authorized reviser cannot be dropped.
+
+Existing format-4 limit questions recover from the preserved final ballots;
+the coordinator retires the obsolete question without fabricating an owner
+answer. Pauses and holds still require their ordinary recovery. A late drop
+preserves the final product pin and earlier selection authority while the
+remaining final ballot denominator is republished. It cannot restart product
+work, including when one agent remains. Earlier escalation questions still
+use the numbered prompt menu (number + Enter; `s` redisplays it).
+
 ## Owner controls
 
 Issue controls accept either an explicit workspace `--coord-runtime` or an

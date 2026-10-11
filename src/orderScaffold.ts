@@ -14,6 +14,8 @@ export type ArtifactScaffoldContext = {
   approvedPaths: readonly string[];
   actionId?: string;
   scopeHash?: string;
+  followUp?: { repository: string; parentUrl: string; key: string };
+  revisionLimit?: boolean;
 };
 
 const PLACEHOLDER_SHA = "<40-lowercase-hex-commit-sha>";
@@ -78,6 +80,13 @@ export const artifactScaffoldValue = (ctx: ArtifactScaffoldContext): Record<stri
         actionId: ctx.actionId ?? "<action-uuid>",
         disposition: "approve",
         rationale: "<one sentence>"
+      };
+    case "R6.follow-up":
+      return {
+        ...withHash(ctx), artifact: "follow-up-ready", actionId: ctx.actionId ?? "<action-uuid>",
+        round: 3,
+        revisionCommitSha: ctx.inputs.find((input) => input.kind === "revision")?.commitSha ?? PLACEHOLDER_SHA,
+        followUpIssueUrl: "<https://github.com/owner/repository/issues/number>"
       };
     case "R7.finalize":
       return {
@@ -173,5 +182,19 @@ export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => 
         scopeHash: ctx.scopeHash, explanation: "<discovered omission>",
         additionalPaths: [{ path: "<exact-product-file-path>", reason: "<why the original plan needs this file>" }] }, null, 2) + "\n```"
     : "";
-  return preamble + "```json\n" + `${json}\n` + "```" + request;
+  const filing = ctx.stepId === "R6.follow-up" && ctx.followUp !== undefined
+    ? `\n\nThe final ballot batch is published. You must file your remaining objections in ${ctx.followUp.repository}. ` +
+      `First search all issue states in that exact repository for tracking key ${ctx.followUp.key}; ` +
+      "inspect and reuse your matching issue on retry. If a prior creation result is uncertain, reconcile it before creating anything. " +
+      "Create one issue containing all your remaining objections, concrete failures, and expected behavior; use a descriptive title. " +
+      `Use gh issue create --repo ${ctx.followUp.repository} with --body-file for the multiline body. ` +
+      "Include these exact separate lines (the parent link must not use a closing keyword):\n\n" +
+      `Related to ${ctx.followUp.parentUrl}\nRevision: ${ctx.inputs.find((input) => input.kind === "revision")?.commitSha ?? PLACEHOLDER_SHA}\nTracking key: ${ctx.followUp.key}\n` +
+      "\nThen publish the receipt below for that issue. If access is unavailable, report the specific blocker; do not claim filing succeeded."
+    : "";
+  const conclusion = ctx.stepId === "R7.finalize" && ctx.revisionLimit === true
+    ? "\n\nThis revision concluded at the three-revision limit with objections recorded in linked follow-up issues. " +
+      "It was not unanimously approved. The legacy consensusSha field names the exact authorized final revision; only the usual current-issue cleanup is permitted."
+    : "";
+  return filing + conclusion + preamble + "```json\n" + `${json}\n` + "```" + request;
 };

@@ -8,7 +8,7 @@ import { computeConsensusDerived, computeImplementationSelectionDerived, compute
 import { appendJournal, cursorsStateSchema, dropAgent, enqueueOwnerGuidance, mutateCursorsState,
   readStartState, replaceCursor, resetOwnerGuidance, setPaused, releaseHold,
   type BallotBatch, type CursorsState } from "./state.js";
-import { STEP_DEFINITIONS, roundForStep, type WorkflowStepId } from "./steps.js";
+import { DEFAULT_MAX_REVISION_ROUNDS, STEP_DEFINITIONS, roundForStep, type WorkflowStepId } from "./steps.js";
 
 export const invalidateUnpublishedBatches = (
   batches: readonly BallotBatch[],
@@ -43,6 +43,32 @@ const rederiveAfterDrop = (
   const priorImplementation = cursors.derived.implementationSelection;
   const priorConsensus = cursors.derived.consensus;
   let next = dropAgent(cursors, dropped, now);
+  // A completed third revision is product authority, not a fresh plurality
+  // election. Republish only the final denominator before deriving its successor.
+  if (priorConsensus?.round === DEFAULT_MAX_REVISION_ROUNDS &&
+    ["R6.ballot", "R6.follow-up", "R7.finalize"].includes(cursors.issueCursor.stepId)) {
+    const agents = { ...next.agents };
+    for (const agent of next.activeRoster) {
+      clearAgentLocalWork(paths, agent, cursors.agents[agent]?.actionId ?? null);
+      agents[agent] = { ...agents[agent]!, stepId: "R6.ballot", evidenceId: "consensus-response-accepted",
+        actionId: null, actionDigest: null, submissionMode: null, status: "idle", submissionSha: null,
+        outstanding: [], updatedAt: now };
+    }
+    clearAgentLocalWork(paths, dropped, cursors.agents[dropped]?.actionId ?? null);
+    return resetOwnerGuidance(cursorsStateSchema.parse({
+      ...next, agents,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: priorConsensus.round },
+      // Preserve the old decision until the reduced roster's batch is published.
+      derived: cursors.derived,
+      accepted: cursors.accepted.filter((submission) => submission.stepId !== "R7.finalize"),
+      acceptedResponses: cursors.acceptedResponses,
+      ownerQuestion: null,
+      publication: { status: "not-required", finalSha: null, branch: null, url: null, error: null,
+        attempts: cursors.publication.attempts },
+      completed: false, updatedAt: now
+    }));
+  }
+
   if (cursors.pendingAmendment != null) {
     for (const agent of cursors.activeRoster) clearAgentLocalWork(paths, agent, cursors.agents[agent]?.actionId ?? null);
     appendJournal(paths, { type: "amendment-decided", details: {
@@ -148,7 +174,7 @@ const rederiveAfterDrop = (
     if (next.activeRoster.length === 1) {
       if (priorPlan.selectedAgents[0] !== next.activeRoster[0]) {
         next = resetTo(next, "R4.implement", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
@@ -156,7 +182,7 @@ const rederiveAfterDrop = (
       const plan = computePlanSelectionDerived(next, now, priorPlan.decisionId);
       if (plan === null) {
         next = resetTo(next, "R3.plan-ballot", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       } else {
@@ -167,7 +193,7 @@ const rederiveAfterDrop = (
         });
         if (plan.selectedAgents[0] !== priorPlan.selectedAgents[0]) {
           next = resetTo(next, "R4.implement", null, (step) =>
-            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
           );
           reset = true;
         }
@@ -179,7 +205,7 @@ const rederiveAfterDrop = (
     const implementation = computeImplementationSelectionDerived(next, now, priorImplementation.decisionId);
     if (implementation === null) {
       next = resetTo(next, "R5.compare-ballot", null, (step) =>
-        ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+        ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
       );
       reset = true;
     } else {
@@ -193,7 +219,7 @@ const rederiveAfterDrop = (
         implementation.implementationPin !== priorImplementation.implementationPin
       ) {
         next = resetTo(next, "R6.revise", 1, (step) =>
-          ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
@@ -261,6 +287,9 @@ export const applyOwnerAnswer = (
         const question = current.ownerQuestion;
         if (current.holds.length > 0 && answer !== "abandon") throw new Error("Release active holds explicitly before advancing an owner question.");
         if (question === null || question.id !== questionId) throw new Error(`Owner question ${questionId} is stale or unknown.`);
+        if (answer === "retry" && question.round === readStartState(paths).maxRevisionRounds) {
+          throw new Error("The third revision concludes automatically after its final evidence is complete; retry cannot discard its ballots.");
+        }
         if (!question.allowedAnswers.includes(answer)) {
           throw new Error(`Answer ${answer} is not allowed for owner question ${questionId}.`);
         }

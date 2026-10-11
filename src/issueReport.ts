@@ -11,7 +11,7 @@ const stageNames: Record<WorkflowStepId, string> = {
   "R1.join": "checking agent readiness", "R2.plan": "writing plans", "R3.review": "reviewing plans",
   "R3.plan-ballot": "choosing a plan", "R4.implement": "implementing", "R4.amend-ballot": "reviewing scope changes",
   "R5.compare": "reviewing implementations", "R5.compare-ballot": "choosing an implementation",
-  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R7.finalize": "finalizing"
+  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R6.follow-up": "filing follow-up issues", "R7.finalize": "finalizing"
 };
 
 export const holdDescription = (reason: CursorsState["holds"][number]["reason"]): string => ({
@@ -94,6 +94,24 @@ export const renderIssueReport = (
     `Final commit (PR head): ${pin ?? "(none)"}`,
     `Published branch: ${branch ?? "(not pushed yet)"}`
   ];
+  const conclusion = cursors.derived.consensus;
+  if (conclusion?.round === start.maxRevisionRounds &&
+    (conclusion.algorithm === "revision-limit-active-roster-v1" || cursors.acceptedResponses.some((response) =>
+      response.stepId === "R6.ballot" && response.round === conclusion.round && response.disposition !== "approve"))) {
+    lines.push(`Conclusion: revision ${conclusion.round} limit reached; objections deferred, not unanimous approval.`);
+    for (const agent of conclusion.objectors ?? []) {
+      if (!cursors.activeRoster.includes(agent)) continue;
+      const receipt = cursors.accepted.find((submission) => submission.stepId === "R6.follow-up" &&
+        submission.agent === agent && submission.followUp?.revisionCommitSha === conclusion.consensusPin);
+      lines.push(receipt?.followUp === undefined
+        ? `Follow-up pending: ${agent}. Inspect its action/access.` +
+          (agent === cursors.derived.implementationSelection?.reviser
+            ? " The authorized reviser must remain active; repair its filing access."
+            : ` ${issueCommand(`drop ${agent}`, start.issue, start.coordRoot)} removes it from the remaining obligations.`)
+        : `Follow-up filed by ${agent}: ${receipt.followUp.url}`);
+    }
+    if (cursors.droppedAgents.length > 0) lines.push(`Dropped agents: ${cursors.droppedAgents.join(", ")}; historical objections are not approvals or filing receipts.`);
+  }
   if (cursors.manualPaused) lines.push(`Manual pause: active (${issueCommand("resume", start.issue, start.coordRoot)} clears only this pause).`);
   for (const hold of cursors.holds) {
     const sends = cursors.actionSafety[hold.agent]?.sends ?? 0;

@@ -333,6 +333,18 @@ describe("derived decision state", () => {
     decidedAt
   };
 
+  it("distinguishes capped objections from legacy unanimous decisions", () => {
+    const cap = { ...base, kind: "consensus", algorithm: "revision-limit-active-roster-v1",
+      decisionId: `consensus:${inputSetHash}:r3`, round: 3, consensusPin: "b".repeat(40), objectors: ["claude"] };
+    expect(consensusDerivedSchema.safeParse(cap).success).toBe(true);
+    for (const patch of [{ objectors: [] }, { objectors: undefined }, { objectors: ["foreign"] },
+      { objectors: ["claude", "claude"] }, { objectors: ["codex", "claude"] },
+      { round: 2, decisionId: `consensus:${inputSetHash}:r2` }, { algorithm: "unanimous-active-roster-v1" }]) {
+      expect(consensusDerivedSchema.safeParse({ ...cap, ...patch }).success).toBe(false);
+    }
+    expect(consensusDerivedSchema.safeParse({ ...cap, algorithm: "unanimous-active-roster-v1", objectors: undefined }).success).toBe(true);
+  });
+
   it("requires a cited input and a hash-bound identity for every derived decision", () => {
     const records = [
       {

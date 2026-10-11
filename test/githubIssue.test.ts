@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assessFollowUpIssue,
+  followUpKey,
   fetchGitHubIssue,
   formatFinalizationPullRequest,
   githubRepositoryFromOrigin,
@@ -150,5 +152,55 @@ describe("GitHub issue snapshots", () => {
         draft: false
       }).title
     ).toBe("Issue 112: coordinated implementation");
+  });
+});
+
+
+describe("follow-up issue verification", () => {
+  const input = { origin: "git@github.com:acme/app.git", issue: 1, issueSessionId: "session",
+    agent: "codex", revisionCommitSha: "e".repeat(40), url: "https://github.com/acme/app/issues/2", cwd: "/tmp" };
+  const body = ["Remaining objections: the regression test is missing.", "Related to https://github.com/acme/app/issues/1",
+    `Revision: ${input.revisionCommitSha}`, `Tracking key: ${followUpKey(input.issueSessionId, input.agent, input.revisionCommitSha)}`].join("\n");
+  const result = (text: string, url = input.url) => ({ exitCode: 0, stderr: "",
+    stdout: JSON.stringify({ number: 2, title: "Follow-up", body: text, url }) });
+
+  it("reads an existing issue and never creates one on success or retry", async () => {
+    const calls: string[][] = [];
+    const runner = async (argv: readonly string[]) => { calls.push([...argv]); return result(body); };
+    const accepted = await assessFollowUpIssue({ ...input, runner });
+    expect(accepted).toEqual({ status: "satisfied", followUp: { number: 2, url: input.url, revisionCommitSha: input.revisionCommitSha } });
+    expect(await assessFollowUpIssue({ ...input, runner })).toEqual(accepted);
+    expect(calls).toEqual(Array.from({ length: 2 }, () => ["gh", "issue", "view", "2", "--repo", "acme/app", "--json", "number,title,body,url"]));
+    for (const stderr of ["network timeout", "HTTP 429", "authentication required"]) {
+      expect(await assessFollowUpIssue({ ...input, runner: async () => ({ exitCode: 1, stdout: "", stderr }) }))
+        .toMatchObject({ status: "retry", outstanding: [expect.stringContaining("retaining the receipt")] });
+    }
+  });
+
+  it("rejects wrong repositories, parent reuse, fabricated issues and stale binding lines", async () => {
+    let calls = 0;
+    const runner = async () => { calls++; return result(body); };
+    for (const url of ["https://github.com/other/app/issues/2", "https://github.com/acme/app/issues/1", "https://github.com/acme/app/pull/2",
+      "https://github.com/acme/app/issues/2?x=1"]) {
+      expect((await assessFollowUpIssue({ ...input, url, runner })).status).toBe("rejected");
+    }
+    expect(calls).toBe(0);
+    for (const text of [body.replace("Related to", "Closes"), body.replace(input.revisionCommitSha, "a".repeat(40)),
+      body.replace("Tracking key:", "wrong key:")]) {
+      expect((await assessFollowUpIssue({ ...input, runner: async () => result(text) })).status).toBe("rejected");
+    }
+    expect((await assessFollowUpIssue({ ...input, runner: async () => result(body, "https://github.com/acme/app/issues/3") })).status).toBe("rejected");
+    expect((await assessFollowUpIssue({ ...input, runner: async () => ({ exitCode: 1, stdout: "", stderr: "Could not resolve to an Issue with the number of 2" }) })).status).toBe("rejected");
+    expect(followUpKey("session", "codex", input.revisionCommitSha)).not.toBe(followUpKey("session", "claude", input.revisionCommitSha));
+  });
+
+  it.each([true, false])("reports capped closeout without changing draft policy %s", (draft) => {
+    const pr = formatFinalizationPullRequest({ issue: 1, title: "Close out", finalSha: input.revisionCommitSha, draft,
+      closeout: { round: 3, followUps: [{ agent: "codex", url: input.url }], droppedAgents: ["claude"] } });
+    expect(pr.body).toContain("Closes #1");
+    expect(pr.body).toContain("not unanimous approval");
+    expect(pr.body).toContain(input.url);
+    expect(pr.body).toContain("Dropped agents: claude");
+    expect(pr.body).toContain(draft ? "Owner merges" : "Coordinator merges");
   });
 });

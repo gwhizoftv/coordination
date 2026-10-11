@@ -34,7 +34,7 @@ export type VerifyFinalizationParams = {
   /** Any path inside the Git worktree/object database containing both commits. */
   root: string;
   issue: number;
-  /** Exact implementation commit approved by consensus. */
+  /** Exact implementation commit authorized for finalization (unanimous or revision-limit conclusion). */
   consensusSha: string;
   /** Proposed merge-ready PR head. */
   finalSha: string;
@@ -59,7 +59,7 @@ const displayChange = (change: GitNameStatusChange): string =>
   `${change.status} ${displayGitPaths(change.paths)}`;
 
 /**
- * Verify the only permitted post-consensus transition: deletion of the
+ * Verify the only permitted post-review transition: deletion of the
  * current issue's coordination files. All additions, modifications,
  * copies, renames, cross-issue cleanup, and product/repository changes fail.
  */
@@ -69,7 +69,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
   }
 
   if (!gitShaPattern.test(params.consensusSha) || !gitShaPattern.test(params.finalSha)) {
-    return rejected(params, "invalid-commit", "Consensus and final commits must be 40-character lowercase Git SHAs.");
+    return rejected(params, "invalid-commit", "Authorized revision and final commits must be 40-character lowercase Git SHAs.");
   }
 
   const inspected = inspectCommitRange(params.root, params.consensusSha, params.finalSha);
@@ -79,7 +79,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       return rejected(
         params,
         "missing-consensus",
-        `Consensus-approved commit ${params.consensusSha} is not available. Fetch the reviewed branch without rewriting it, then rerun finalization verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
+        `Authorized revision commit ${params.consensusSha} is not available. Fetch the reviewed branch without rewriting it, then rerun finalization verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
       );
     }
 
@@ -95,14 +95,14 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       return rejected(
         params,
         "history-rewrite",
-        `Final commit ${params.finalSha} is not a descendant of consensus-approved commit ${params.consensusSha}. Invariant: finalization may only append cleanup after the reviewed implementation; it may not replace or rewrite that history.`
+        `Final commit ${params.finalSha} is not a descendant of authorized revision commit ${params.consensusSha}. Invariant: finalization may only append cleanup after the reviewed implementation; it may not replace or rewrite that history.`
       );
     }
 
     return rejected(
       params,
       "inspection-failed",
-      `The consensus-to-final diff could not be inspected safely. Remediation: restore complete readable Git history and rerun verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
+      `The authorized-revision-to-final diff could not be inspected safely. Remediation: restore complete readable Git history and rerun verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
     );
   }
 
@@ -119,7 +119,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       "non-cleanup-change",
       `Finalization contains changes outside deletion-only cleanup for issue ${params.issue}: ${disallowed
         .map(displayChange)
-        .join("; ")}. Invariant: only deletions under .plans/issue-${params.issue}/**, .signals/issue-${params.issue}/**, and .code-reviews/issue-${params.issue}/** may follow consensus. Remove every addition, modification, rename/copy, implementation, dependency, test, automation, script, hook, documentation, root, or other-issue change before opening the merge-ready PR.`
+        .join("; ")}. Invariant: only deletions under .plans/issue-${params.issue}/**, .signals/issue-${params.issue}/**, and .code-reviews/issue-${params.issue}/** may follow the authorized revision. Remove every addition, modification, rename/copy, implementation, dependency, test, automation, script, hook, documentation, root, or other-issue change before opening the merge-ready PR.`
     );
   }
 

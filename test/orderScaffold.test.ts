@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { artifactScaffoldValue, renderArtifactScaffold } from "../src/orderScaffold.js";
-import { planAmendmentRequestSchema } from "../src/protocol.js";
+import { followUpIssueArtifactSchema, planAmendmentRequestSchema } from "../src/protocol.js";
 import { BUILD_DISCIPLINE_NOTE, STEP_DEFINITIONS } from "../src/steps.js";
 
 describe("orderScaffold", () => {
@@ -184,4 +184,20 @@ describe("orderScaffold", () => {
         .map((definition) => definition.id)
     ).toEqual(["R2.plan", "R4.implement", "R6.revise"]);
   });
+});
+
+
+it("instructs objectors to reconcile retries and file all objections with bound receipt identity", () => {
+  const ctx = { stepId: "R6.follow-up" as const, issue: 1, issueSessionId: "session", agent: "codex",
+    actionId: "10000000-0000-4000-8000-000000000001", baselineSha: "a".repeat(40), automationDigest: "b".repeat(64),
+    inputs: [{ kind: "revision", agent: "claude", commitSha: "c".repeat(40), path: ".signals/issue-1/revision.json" }],
+    eligibleChoices: [], round: 3, approvedPaths: [],
+    followUp: { repository: "acme/app", parentUrl: "https://github.com/acme/app/issues/1", key: "stable-key" } };
+  const scaffold = artifactScaffoldValue(ctx);
+  expect(followUpIssueArtifactSchema.parse({ ...scaffold, followUpIssueUrl: "https://github.com/acme/app/issues/2" }))
+    .toMatchObject({ actionId: ctx.actionId, round: 3, revisionCommitSha: "c".repeat(40) });
+  const text = renderArtifactScaffold(ctx);
+  for (const expected of ["all your remaining objections", "all issue states", "stable-key", "--body-file", "Related to https://github.com/acme/app/issues/1", "Revision: " + "c".repeat(40)]) {
+    expect(text).toContain(expected);
+  }
 });

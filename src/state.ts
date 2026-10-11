@@ -22,6 +22,7 @@ import {
   citationDigestSchema,
   digestSchema,
   gitShaSchema,
+  followUpEvidenceSchema,
   issueSchema,
   issueSessionIdSchema,
   repositoryPathSchema
@@ -62,6 +63,7 @@ const stepIdSchema = z.enum([
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ]);
 const gateIdSchema = z.enum([
@@ -84,6 +86,7 @@ const evidenceIdSchema = z.enum([
   "comparison-response-accepted",
   "revision-pinned",
   "consensus-response-accepted",
+  "follow-up-published",
   "finalization-verified"
 ]);
 const ballotStepIdSchema = z.enum(["R3.plan-ballot", "R5.compare-ballot", "R6.ballot", "R4.amend-ballot"]);
@@ -585,7 +588,8 @@ export const implementationSelectionDerivedSchema = derivedDecisionBaseSchema
 export const consensusDerivedSchema = derivedDecisionBaseSchema
   .extend({
     kind: z.literal("consensus"),
-    algorithm: z.literal("unanimous-active-roster-v1"),
+    algorithm: z.enum(["unanimous-active-roster-v1", "revision-limit-active-roster-v1"]),
+    objectors: z.array(agentIdSchema).min(1).optional(),
     decisionId: consensusDecisionIdSchema,
     supersedes: consensusDecisionIdSchema.nullable(),
     round: z.number().int().min(1),
@@ -595,7 +599,12 @@ export const consensusDerivedSchema = derivedDecisionBaseSchema
   .refine((record) => record.decisionId === `consensus:${record.inputSetHash}:r${record.round}`, {
     path: ["decisionId"],
     message: "decision identity must match the consensus input hash and round"
-  });
+  })
+  .refine((record) => record.algorithm === "unanimous-active-roster-v1"
+    ? record.objectors === undefined
+    : record.round === DEFAULT_MAX_REVISION_ROUNDS && record.objectors !== undefined &&
+      JSON.stringify(record.objectors) === JSON.stringify(record.activeRoster.filter((agent) => record.objectors!.includes(agent))),
+  { message: "revision-limit decisions require round three and distinct objectors in active roster order; unanimous decisions have no objectors" });
 
 export const derivedStateSchema = z
   .object({
@@ -612,6 +621,7 @@ export const acceptedSubmissionSchema = z
     round: z.number().int().min(1).nullable(),
     submissionSha: gitShaSchema,
     productPin: gitShaSchema.optional(),
+    followUp: followUpEvidenceSchema.optional(),
     disposition: z.enum(["approve", "revise", "escalate"]).optional(),
     approvedPaths: z.array(z.string().min(1)).optional(),
     choice: agentIdSchema.optional(),
@@ -863,6 +873,7 @@ const journalEventTypeSchema = z.enum([
   "gate-advanced",
   "owner-question",
   "owner-answer",
+  "owner-question-retired",
   "owner-guidance-queued",
   "owner-guidance-bound",
   "agent-dropped",

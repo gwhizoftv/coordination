@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import { sha256 } from "./hash.js";
+import type { FollowUpEvidence } from "./protocol.js";
 
 export type CommandResult = { exitCode: number; stdout: string; stderr: string };
 export type CommandRunner = (argv: readonly string[], cwd: string) => Promise<CommandResult>;
@@ -64,6 +66,7 @@ export const formatFinalizationPullRequest = (input: {
   draft: boolean;
   evidenceBranch?: string | null;
   evidenceTip?: string | null;
+  closeout?: { round: number; followUps: readonly { agent: string; url: string }[]; droppedAgents: readonly string[] };
 }): { title: string; body: string } => {
   const issueTitle = input.title.trim() === "" ? "coordinated implementation" : input.title.trim();
   const lines = [
@@ -82,6 +85,12 @@ export const formatFinalizationPullRequest = (input: {
           : "."),
       "That branch is coordinator-authored publication of action-bound ballot responses, not a cryptographic agent signature."
     );
+  }
+  if (input.closeout !== undefined) {
+    lines.push("", `Concluded after revision ${input.closeout.round}; objections were recorded (not unanimous approval). Active objectors filed the follow-up issues listed below.`);
+    for (const followUp of input.closeout.followUps) lines.push(`- ${followUp.agent}: ${followUp.url}`);
+    if (input.closeout.droppedAgents.length > 0) lines.push(
+      `Dropped agents: ${input.closeout.droppedAgents.join(", ")}; their historical ballots remain in the evidence branch, not counted as approvals or filed objections.`);
   }
   return {
     title: `Issue ${input.issue}: ${issueTitle}`,
@@ -165,4 +174,49 @@ export const fetchGitHubIssue = async (input: {
     );
   }
   return { repository, ...parsed.data };
+};
+
+/** Stable across replacement actions and coordinator restarts. */
+export const followUpKey = (issueSessionId: string, agent: string, revisionCommitSha: string): string =>
+  `coord-follow-up:${sha256(JSON.stringify([issueSessionId, agent, revisionCommitSha]))}`;
+
+export type FollowUpAssessment =
+  | { status: "satisfied"; followUp: FollowUpEvidence }
+  | { status: "rejected" | "retry"; outstanding: readonly string[] };
+
+/** Read-only verification; the objecting agent owns creation and reconciliation. */
+export const assessFollowUpIssue = async (input: {
+  origin: string; issue: number; issueSessionId: string; agent: string;
+  revisionCommitSha: string; url: string; cwd: string; runner: CommandRunner;
+}): Promise<FollowUpAssessment> => {
+  const repository = githubRepositoryFromOrigin(input.origin);
+  const reject = (message: string): FollowUpAssessment => ({ status: "rejected", outstanding: [message] });
+  if (repository === null) return reject("Cannot identify the GitHub repository for follow-up verification.");
+  const prefix = `https://github.com/${repository}/issues/`;
+  const suffix = input.url.startsWith(prefix) ? input.url.slice(prefix.length) : "";
+  const number = Number(suffix);
+  if (!/^[1-9][0-9]*$/.test(suffix) || !Number.isSafeInteger(number) || number === input.issue) {
+    return reject(`Follow-up URL must identify a different issue in ${repository}.`);
+  }
+  let issue: GitHubIssueSnapshot;
+  try {
+    issue = await fetchGitHubIssue({ origin: input.origin, issue: number, cwd: input.cwd, runner: input.runner });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // A missing issue needs a corrected receipt. Transport/authentication outages
+    // retain the submitted receipt; they never ask an agent to file again.
+    if (/could not resolve to an issue|could not find issue|HTTP 404|issue[^\n]*not found/i.test(message)) {
+      return reject("The cited follow-up issue does not exist; reconcile your existing filing before correcting the receipt.");
+    }
+    return { status: "retry", outstanding: [`Follow-up lookup unavailable; retaining the receipt: ${message}`] };
+  }
+  if (issue.url !== input.url) return reject("GitHub returned a different follow-up issue URL.");
+  const parentUrl = `https://github.com/${repository}/issues/${input.issue}`;
+  const lines = issue.body.split(/\r?\n/).map((line) => line.trim());
+  if (!lines.includes(`Related to ${parentUrl}`)) return reject(`Follow-up body must include this non-closing backlink on its own line: Related to ${parentUrl}`);
+  if (!lines.includes(`Revision: ${input.revisionCommitSha}`)) return reject("Follow-up body must name the exact final revision on its Revision line.");
+  if (!lines.includes(`Tracking key: ${followUpKey(input.issueSessionId, input.agent, input.revisionCommitSha)}`)) {
+    return reject("Follow-up body must include the supplied stable tracking key; reuse your existing issue when correcting it.");
+  }
+  return { status: "satisfied", followUp: { number, url: issue.url, revisionCommitSha: input.revisionCommitSha } };
 };

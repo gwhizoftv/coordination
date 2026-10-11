@@ -19,6 +19,8 @@ import {
   buildOrder,
   computeDerivedInputSetHash,
   computePlanSelectionDerived,
+  computeConsensusDerived,
+  deriveBoundInputs,
   CoordinatorRunLoop,
   derivedDecisionJournalDetails,
   deterministicWinner,
@@ -48,9 +50,11 @@ import { parseClaudeRateLimits, parseCodexRateLimits } from "../src/resourceEvid
 import { resourceBindingPaths } from "../src/paths.js";
 import type { RunLoopDependencies } from "../src/runLoop.js";
 import { writeAgentResponse } from "../src/ballotResponse.js";
-import { queueOwnerGuidance } from "../src/ownerControls.js";
+import { applyOwnerAnswer, dropOwnerAgent, queueOwnerGuidance } from "../src/ownerControls.js";
 import type { ConsensusBallotResponse } from "../src/protocol.js";
 import type { AcceptedResponse, BallotBatch } from "../src/state.js";
+import { decide } from "../src/machine.js";
+import { followUpKey } from "../src/githubIssue.js";
 import { createHash, randomUUID } from "node:crypto";
 import { hookVerificationRecorder, createVerificationIngestor, verificationMeasurement } from "../src/verificationLog.js";
 import * as stateModule from "../src/state.js";
@@ -2798,7 +2802,7 @@ describe("effectful run loop", () => {
     expect(existsSync(responsePath)).toBe(false);
   });
 
-  it("publishes exactly from durable accepted R7 outbox state and records retryable failure", async () => {
+  it.each([false, true])("publishes durable R7 outbox after restart (revision limit: %s)", async (capped) => {
     const { paths } = fixture({ prPolicy: "coord-open-unmerged", origin: "https://github.com/example/project.git" });
     const now = "2026-08-11T17:00:00.000Z";
     const finalSha = "f".repeat(40);
@@ -2845,9 +2849,17 @@ describe("effectful run loop", () => {
             implementationPin: "e".repeat(40),
             reviser: "codex"
           },
-          consensus: null
+          consensus: capped ? {
+            kind: "consensus", algorithm: "revision-limit-active-roster-v1", objectors: ["claude"], round: 3,
+            activeRoster: current.activeRoster, inputSetHash: "c".repeat(64), decisionId: `consensus:${"c".repeat(64)}:r3`,
+            inputs: [{ kind: "revision", agent: "codex", submissionSha: "d".repeat(40), productPin: "e".repeat(40), path: ".signals/issue-1/revision.json" }],
+            consensusPin: "e".repeat(40), decidedAt: now, supersedes: null
+          } : null
         },
         accepted: [
+          ...(capped ? [{ stepId: "R6.follow-up", agent: "claude", round: 3, submissionSha: "a".repeat(40),
+            path: ".signals/issue-1/follow-up-ready-claude-round-3.json", acceptedAt: now,
+            followUp: { number: 2, url: "https://github.com/example/project/issues/2", revisionCommitSha: "e".repeat(40) } }] : []),
           {
             stepId: "R7.finalize",
             agent: "codex",
@@ -2899,8 +2911,13 @@ describe("effectful run loop", () => {
       tmux: null,
       mirror,
       log: (message) => progress.push(message),
-      pullRequestOpener: async () => {
+      pullRequestOpener: async (input) => {
         expect(progress.at(-1)).toBe("[WAIT] Opening the pull request...");
+        expect(input.body).toContain(`Final pin: ${finalSha}`);
+        expect(input.draft).toBe(true);
+        expect(input.body).toContain("Closes #1");
+        expect(input.body.includes("not unanimous approval")).toBe(capped);
+        expect(input.body.includes("https://github.com/example/project/issues/2")).toBe(capped);
         opens += 1;
         return { url: "https://github.com/example/project/pull/1" };
       }
@@ -3894,5 +3911,164 @@ describe("coordinator-resolved change scope", () => {
     const order = buildOrder(paths, start, readCursorsState(paths), "claude", "R2.plan", null);
     expect(order.contextPaths).toEqual(["docs/repo-map.md"]);
     expect(order.changeScope).toEqual([]);
+  });
+});
+
+
+describe("third revision closeout", () => {
+  const terminalFixture = (disposition: "revise" | "escalate" | "approve" = "revise") => {
+    const { paths } = fixture({ origin: "https://github.com/acme/app.git" });
+    const start = readStartState(paths);
+    const base = readCursorsState(paths);
+    const now = base.updatedAt;
+    const revision = { stepId: "R6.revise", agent: "codex", round: 3, submissionSha: "d".repeat(40),
+      productPin: "e".repeat(40), path: ".signals/issue-1/revision-ready-codex-round-3.json", acceptedAt: now };
+    const cursors = cursorsStateSchema.parse({ ...base,
+      issueCursor: { stepId: "R6.ballot", gateId: "gate-6-consensus", round: 3 },
+      accepted: [revision],
+      derived: { ...base.derived, implementationSelection: {
+        kind: "implementation-selection", algorithm: "plurality-active-roster-v1", inputSetHash: "b".repeat(64),
+        activeRoster: base.activeRoster, inputs: [{ kind: "implementation", agent: "codex", submissionSha: "c".repeat(40),
+          path: ".signals/issue-1/implementation-ready-codex.json", productPin: "f".repeat(40) }],
+        decisionId: `implementation-selection:${"b".repeat(64)}`, supersedes: null, decidedAt: now,
+        winner: "codex", reviser: "codex", implementationPin: "f".repeat(40)
+      } },
+      acceptedResponses: base.activeRoster.map((agent) => acceptedResponseFixture({ stepId: "R6.ballot", agent, round: 3,
+        disposition: agent === "claude" ? disposition : "approve" })),
+      ballotBatches: [publishedBallotBatchFixture({ kind: "consensus-ballot-batch", activeRoster: base.activeRoster, round: 3 })]
+    });
+    writeCursorsState(paths, cursors);
+    const mirror = new BareMirror(paths.mirror, start.origin, async () => ({ exitCode: 0, stdout: Buffer.alloc(0), stderr: "" }));
+    return { paths, start, cursors, mirror, now, revision };
+  };
+
+  it.each(["revise", "escalate", "approve"] as const)("derives exact published terminal evidence for %s", (disposition) => {
+    const { cursors, now, revision } = terminalFixture(disposition);
+    const derived = computeConsensusDerived(cursors, 3, now)!;
+    expect(derived.consensusPin).toBe(revision.productPin);
+    expect(derived.algorithm).toBe(disposition === "approve" ? "unanimous-active-roster-v1" : "revision-limit-active-roster-v1");
+    expect(derived.objectors).toEqual(disposition === "approve" ? undefined : ["claude"]);
+    expect(computeConsensusDerived({ ...cursors, ballotBatches: [] }, 3, now)).toBeNull();
+    expect(computeConsensusDerived({ ...cursors, acceptedResponses: cursors.acceptedResponses.slice(1) }, 3, now)).toBeNull();
+    expect(computeConsensusDerived({ ...cursors, accepted: [] }, 3, now)).toBeNull();
+    const wrongReviser = { ...cursors, accepted: [{ ...cursors.accepted[0]!, agent: "claude" }] };
+    expect(computeConsensusDerived(wrongReviser, 3, now)).toBeNull();
+    const staleBatch = { ...cursors, ballotBatches: [{ ...cursors.ballotBatches[0]!, responses: [] }] };
+    expect(computeConsensusDerived(staleBatch, 3, now)).toBeNull();
+    const earlier = cursorsStateSchema.parse({ ...cursors,
+      accepted: [{ ...revision, round: 2 }],
+      acceptedResponses: cursors.acceptedResponses.map((entry) => ({ ...entry, round: 2 })),
+      ballotBatches: [publishedBallotBatchFixture({ kind: "consensus-ballot-batch", activeRoster: cursors.activeRoster, round: 2 })] });
+    expect(computeConsensusDerived(earlier, 2, now)?.algorithm ?? null)
+      .toBe(disposition === "approve" ? "unanimous-active-roster-v1" : null);
+  });
+
+  it.each(["revision-limit", "ballot-escalation"] as const)("retires a legacy %s question once without recording a human answer", async (kind) => {
+    const { paths, cursors, mirror, revision } = terminalFixture("escalate");
+    const question = { id: actionIdFor("codex"), kind, round: 3, allowedAnswers: ["retry", "abandon"], createdAt: cursors.updatedAt };
+    writeCursorsState(paths, cursorsStateSchema.parse({ ...cursors, ownerQuestion: question }));
+    expect(() => applyOwnerAnswer(paths, question.id, "retry")).toThrow(/retry cannot discard/);
+    const loop = () => new CoordinatorRunLoop(paths, { mirror, tmux: null, log: () => undefined });
+    const after = await loop().runTick();
+    expect(after.ownerQuestion).toBeNull();
+    expect(after.lastOwnerAnswer).toBeNull();
+    expect(after.acceptedResponses).toEqual(cursors.acceptedResponses);
+    expect(after.derived.consensus).toMatchObject({ algorithm: "revision-limit-active-roster-v1", consensusPin: revision.productPin });
+    expect(after.issueCursor.stepId).toBe("R6.follow-up");
+    await loop().runTick();
+    expect(readJournal(paths).filter((entry) => entry.type === "owner-question-retired")).toHaveLength(1);
+    expect(readJournal(paths).filter((entry) => entry.type === "owner-answer")).toHaveLength(0);
+    expect(readJournal(paths).filter((entry) => entry.type === "decision-derived")).toHaveLength(1);
+  });
+
+  it("recovers journal-before-state closeout without erasing receipts or bypassing a pause", async () => {
+    const { paths, cursors, mirror, now, revision } = terminalFixture();
+    const record = computeConsensusDerived(cursors, 3, now)!;
+    appendJournal(paths, { type: "decision-derived", details: derivedDecisionJournalDetails(record) }, now);
+    const receipt = { stepId: "R6.follow-up", agent: "claude", round: 3, submissionSha: "a".repeat(40),
+      path: ".signals/issue-1/follow-up-ready-claude-round-3.json", acceptedAt: now,
+      followUp: { number: 2, url: "https://github.com/acme/app/issues/2", revisionCommitSha: revision.productPin } };
+    writeCursorsState(paths, cursorsStateSchema.parse({ ...cursors, manualPaused: true, paused: true, accepted: [...cursors.accepted, receipt] }));
+    const loop = () => new CoordinatorRunLoop(paths, { mirror, tmux: null, log: () => undefined });
+    const paused = await loop().runTick();
+    expect(paused.derived.consensus).toBeNull();
+    mutateCursorsState(paths, (current) => setPaused(current, false));
+    const recovered = await loop().runTick();
+    expect(recovered.derived.consensus?.decisionId).toBe(record.decisionId);
+    expect(recovered.derived.consensus?.decidedAt).toBe(now);
+    expect(recovered.accepted).toContainEqual(receipt);
+    expect(recovered.issueCursor.stepId).toBe("R7.finalize");
+    expect(readJournal(paths).filter((entry) => entry.type === "decision-derived")).toHaveLength(1);
+  });
+
+  it.each(["outage", "pause"] as const)("preserves a receipt through %s and restart, then finalizes the same revision", async (interruption) => {
+    const { paths, start, mirror, revision } = terminalFixture();
+    await new CoordinatorRunLoop(paths, { mirror, tmux: null, log: () => undefined }).runTick();
+    const before = readCursorsState(paths);
+    const actionId = before.agents.claude!.actionId!;
+    const order = buildOrder(paths, start, before, "claude", "R6.follow-up", 3, actionId);
+    expect(order.inputs.filter((input) => input.kind === "consensus-ballot")).toHaveLength(2);
+    const receipt = { protocolVersion: 1, issue: 1, issueSessionId: start.issueSessionId, agent: "claude", artifact: "follow-up-ready",
+      actionId, inputSetHash: computeInputSetHash(order.inputs), round: 3, revisionCommitSha: revision.productPin,
+      followUpIssueUrl: "https://github.com/acme/app/issues/2" };
+    vi.spyOn(mirror, "fetchBranch").mockResolvedValue({ ok: true, ref: "refs/remotes/origin/issue-1/claude", tip: "a".repeat(40) });
+    vi.spyOn(mirror, "isReachable").mockResolvedValue(true);
+    vi.spyOn(mirror, "readBlob").mockImplementation(async (_sha, path) => path === order.requiredPath ? JSON.stringify(receipt) : null);
+    const runtime = agentRuntimePaths(paths, "claude");
+    writeFileSync(runtime.complete, "a".repeat(40));
+    const unavailable = new CoordinatorRunLoop(paths, { mirror, tmux: null, log: () => undefined,
+      processRunner: async () => {
+        if (interruption === "pause") mutateCursorsState(paths, (current) => setPaused(current, true));
+        return { exitCode: 1, stdout: "", stderr: "network timeout" };
+      } });
+    await unavailable.runTick();
+    expect(readCursorsState(paths).agents.claude!.actionId).toBe(actionId);
+    expect(readCursorsState(paths).accepted.filter((entry) => entry.stepId === "R6.follow-up")).toHaveLength(0);
+    expect(existsSync(runtime.complete)).toBe(true);
+    if (interruption === "pause") {
+      expect(readCursorsState(paths).manualPaused).toBe(true);
+      mutateCursorsState(paths, (current) => setPaused(current, false));
+    }
+    const calls: string[][] = [];
+    const restored = new CoordinatorRunLoop(paths, { mirror, tmux: null, log: () => undefined,
+      processRunner: async (argv) => {
+        calls.push([...argv]);
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({ number: 2, title: "Remaining objections", url: receipt.followUpIssueUrl,
+          body: ["All remaining objections", "Related to https://github.com/acme/app/issues/1", `Revision: ${revision.productPin}`,
+            `Tracking key: ${followUpKey(start.issueSessionId, "claude", revision.productPin)}`].join("\n") }) };
+      } });
+    const after = await restored.runTick();
+    expect(after.accepted.find((entry) => entry.stepId === "R6.follow-up")?.followUp).toEqual({
+      number: 2, url: receipt.followUpIssueUrl, revisionCommitSha: revision.productPin
+    });
+    expect(after.issueCursor.stepId).toBe("R7.finalize");
+    expect(deriveBoundInputs(start, after, "R7.finalize", null)[0]?.commitSha).toBe(revision.productPin);
+    expect(existsSync(runtime.complete)).toBe(false);
+    await restored.runTick();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.slice(0, 3)).toEqual(["gh", "issue", "view"]);
+  });
+
+  it("drops only a late non-reviser, republishes the reduced final batch and preserves the revision with one survivor", () => {
+    const { paths, start, cursors, now, revision } = terminalFixture();
+    const conclusion = computeConsensusDerived(cursors, 3, now)!;
+    writeCursorsState(paths, cursorsStateSchema.parse({ ...cursors,
+      issueCursor: { stepId: "R6.follow-up", gateId: "gate-6-consensus", round: 3 },
+      derived: { ...cursors.derived, consensus: conclusion } }));
+    expect(() => dropOwnerAgent(paths, "codex")).toThrow(/authorized reviser/);
+    const dropped = dropOwnerAgent(paths, "claude");
+    expect(dropped.activeRoster).toEqual(["codex"]);
+    expect(dropped.acceptedResponses).toEqual(cursors.acceptedResponses);
+    expect(dropped.derived.implementationSelection).toEqual(cursors.derived.implementationSelection);
+    expect(decide({ start, cursors: dropped })).toEqual([{ type: "publish-ballot-batch", stepId: "R6.ballot", round: 3 }]);
+    const republished = { ...dropped, ballotBatches: [...dropped.ballotBatches,
+      publishedBallotBatchFixture({ kind: "consensus-ballot-batch", activeRoster: ["codex"], round: 3, commitSha: "9".repeat(40) })] };
+    const successor = computeConsensusDerived(republished, 3, now)!;
+    expect(successor.consensusPin).toBe(revision.productPin);
+    expect(successor.supersedes).toBe(conclusion.decisionId);
+    expect(successor.algorithm).toBe("unanimous-active-roster-v1");
+    const final = { ...republished, derived: { ...republished.derived, consensus: successor } };
+    expect(decide({ start, cursors: final })).toEqual([{ type: "advance-step", from: "R6.ballot", to: "R7.finalize", round: null }]);
+    expect(deriveBoundInputs(start, final, "R7.finalize", null)[0]?.commitSha).toBe(revision.productPin);
   });
 });

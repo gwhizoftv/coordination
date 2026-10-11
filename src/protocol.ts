@@ -180,6 +180,26 @@ export const consensusBallotArtifactSchema = z
   })
   .strict();
 
+/** Agent-published proof of filing after the final ballot batch is public. */
+export const followUpIssueArtifactSchema = z.object({
+  ...commonArtifactFields,
+  artifact: z.literal("follow-up-ready"),
+  actionId: actionIdSchema,
+  inputSetHash: digestSchema,
+  round: z.literal(3),
+  revisionCommitSha: gitShaSchema,
+  followUpIssueUrl: z.string().url()
+}).strict();
+
+/** Stored only after the coordinator has checked the remote issue. */
+export const followUpEvidenceSchema = z.object({
+  number: issueSchema,
+  url: z.string().url(),
+  revisionCommitSha: gitShaSchema
+}).strict();
+export type FollowUpEvidence = z.infer<typeof followUpEvidenceSchema>;
+export type FollowUpIssueArtifact = z.infer<typeof followUpIssueArtifactSchema>;
+
 export const finalizationArtifactSchema = z
   .object({
     ...commonArtifactFields,
@@ -205,6 +225,7 @@ export const publishedArtifactSchema = z.discriminatedUnion("artifact", [
   revisionReadyArtifactSchema,
   consensusBallotArtifactSchema,
   finalizationArtifactSchema,
+  followUpIssueArtifactSchema,
   planAmendmentRequestSchema,
   amendmentBallotArtifactSchema
 ]);
