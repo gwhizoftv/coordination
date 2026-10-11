@@ -260,6 +260,42 @@ describe("agent-facing language", () => {
     }
   });
 
+  it("keeps internal vocabulary out of the follow-up filing and finalization text after a revision-limit conclusion", () => {
+    const paths = fixture();
+    seedAcceptedSubmissions(paths);
+    const current = readCursorsState(paths);
+    const inputSetHash = "c".repeat(64);
+    writeCursorsState(paths, cursorsStateSchema.parse({
+      ...current,
+      derived: {
+        ...current.derived,
+        consensus: {
+          kind: "consensus",
+          algorithm: "revision-limit-active-roster-v1",
+          inputSetHash,
+          activeRoster: current.activeRoster,
+          inputs: [{ kind: "revision", agent: "codex", submissionSha: "7".repeat(40),
+            path: ".signals/issue-1/revision-ready-codex-round-3.json", productPin: "8".repeat(40) }],
+          decisionId: `consensus:${inputSetHash}:r3`,
+          supersedes: null,
+          decidedAt: "2026-08-21T00:00:00.000Z",
+          round: 3,
+          consensusPin: "8".repeat(40),
+          objectors: [{ agent: "codex", disposition: "revise" }]
+        }
+      }
+    }));
+    const start = readStartState(paths);
+    const cursors = readCursorsState(paths);
+    const followUp = renderAction(buildOrder(paths, start, cursors, "codex", "R6.follow-up", 3, "b2337d85-6617-4e9f-8ace-901453764aa4"));
+    expect(followUp).toContain("gh issue create");
+    expect(followUp).toContain('"artifact": "follow-up-ready"');
+    expect(findAgentLanguageViolations(followUp)).toEqual([]);
+    const finalize = renderAction(buildOrder(paths, start, cursors, "codex", "R7.finalize", null, "b2337d85-6617-4e9f-8ace-901453764aa4"));
+    expect(finalize).toContain("concluded with objections on record");
+    expect(findAgentLanguageViolations(finalize)).toEqual([]);
+  });
+
   it("keeps internal vocabulary out of the correction block", () => {
     const paths = fixture();
     seedAcceptedSubmissions(paths);
@@ -328,14 +364,14 @@ describe("agent-facing language", () => {
   });
 
   it("covers every workflow step and every evidence id", () => {
-    expect(everyStep).toHaveLength(11);
+    expect(everyStep).toHaveLength(12);
     const subjects = new Set<string>();
     for (const stepId of everyStep) {
       const subject = agentFacingSubject(STEP_DEFINITIONS[stepId].evidenceId);
       expect(subject, stepId).toBeTruthy();
       subjects.add(subject);
     }
-    expect(subjects.size).toBe(11);
+    expect(subjects.size).toBe(12);
     for (const subject of agentFacingSubjects()) {
       expect(findAgentLanguageViolations(subject), subject).toEqual([]);
     }

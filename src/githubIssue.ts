@@ -57,6 +57,14 @@ export const readGitHubIssueSnapshot = (path: string): GitHubIssueSnapshot => {
  * Optional evidence fields name the coordinator-authored ballot publication
  * branch; they are not a cryptographic agent signature.
  */
+/** One objection recorded when the final revision round concluded the issue. */
+export type CloseoutObjection = {
+  agent: string;
+  disposition: "revise" | "escalate";
+  /** The verified follow-up issue, or null when the objector was dropped before filing. */
+  followUp: { number: number; url: string } | null;
+};
+
 export const formatFinalizationPullRequest = (input: {
   issue: number;
   title: string;
@@ -64,6 +72,8 @@ export const formatFinalizationPullRequest = (input: {
   draft: boolean;
   evidenceBranch?: string | null;
   evidenceTip?: string | null;
+  /** Present when the revision limit, not unanimous approval, concluded the issue. */
+  closeout?: { round: number; objections: readonly CloseoutObjection[] };
 }): { title: string; body: string } => {
   const issueTitle = input.title.trim() === "" ? "coordinated implementation" : input.title.trim();
   const lines = [
@@ -81,6 +91,17 @@ export const formatFinalizationPullRequest = (input: {
           ? ` (tip ${input.evidenceTip}).`
           : "."),
       "That branch is coordinator-authored publication of action-bound ballot responses, not a cryptographic agent signature."
+    );
+  }
+  if (input.closeout !== undefined) {
+    lines.push(
+      "",
+      `Concluded at the revision limit (round ${input.closeout.round}): this revision is finalized with objections ` +
+        "on record, not with unanimous approval. Each objecting agent filed its remaining objections as a follow-up issue:",
+      ...input.closeout.objections.map((objection) =>
+        `- ${objection.agent} (${objection.disposition}): ` +
+          (objection.followUp === null ? "dropped before filing a follow-up issue" : objection.followUp.url)
+      )
     );
   }
   return {
@@ -165,4 +186,66 @@ export const fetchGitHubIssue = async (input: {
     );
   }
   return { repository, ...parsed.data };
+};
+
+export type FollowUpVerification =
+  | { status: "verified"; number: number; url: string }
+  | { status: "rejected"; reason: string }
+  | { status: "unavailable"; reason: string };
+
+const CLOSING_REFERENCE = (issue: number): RegExp =>
+  new RegExp(`\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b\\s*:?\\s*(?:#|https://github\\.com/\\S+/issues/)${issue}(?![0-9])`, "i");
+
+/**
+ * Read the follow-up issue an objector cites and check that it is the issue
+ * this objection needs: a different issue in the same repository whose body
+ * references the concluding issue without closing it, names the final
+ * revision, and carries the stable filing key. A failed lookup is reported as
+ * unavailable, never as a rejection, so the objector is not told to file again.
+ */
+export const verifyFollowUpIssue = async (input: {
+  origin: string;
+  parentIssue: number;
+  claimedUrl: string;
+  revisionSha: string;
+  filingKey: string;
+  cwd: string;
+  runner: CommandRunner;
+}): Promise<FollowUpVerification> => {
+  const repository = githubRepositoryFromOrigin(input.origin);
+  if (repository === null) {
+    return { status: "rejected", reason: `origin ${input.origin} is not a GitHub repository; no follow-up issue can be verified` };
+  }
+  const claimed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)$/.exec(input.claimedUrl);
+  if (claimed === null || claimed[1]!.toLowerCase() !== repository.toLowerCase()) {
+    return { status: "rejected", reason: `follow-up issue ${input.claimedUrl} must be an issue URL in ${repository}` };
+  }
+  const number = Number(claimed[2]);
+  if (number === input.parentIssue) {
+    return { status: "rejected", reason: `the follow-up must be a new issue, not #${input.parentIssue} itself` };
+  }
+  let issue: GitHubIssueSnapshot;
+  try {
+    issue = await fetchGitHubIssue({ origin: input.origin, issue: number, cwd: input.cwd, runner: input.runner });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /could not resolve to an issue|not found|HTTP 404/i.test(message)
+      ? { status: "rejected", reason: `follow-up issue ${input.claimedUrl} does not exist in ${repository}` }
+      : { status: "unavailable", reason: message };
+  }
+  const parentUrl = `https://github.com/${repository}/issues/${input.parentIssue}`;
+  const references = new RegExp(`(?:^|[^0-9A-Za-z_/])#${input.parentIssue}(?![0-9])`).test(issue.body) ||
+    issue.body.includes(parentUrl);
+  const missing = [
+    ...(references ? [] : [`a reference to #${input.parentIssue}`]),
+    ...(issue.body.includes(input.revisionSha) ? [] : [`the final revision ${input.revisionSha}`]),
+    ...(issue.body.includes(input.filingKey) ? [] : [`the filing key ${input.filingKey}`])
+  ];
+  if (missing.length > 0) {
+    return { status: "rejected", reason: `follow-up issue ${issue.url} body is missing ${missing.join(", ")}; edit that issue rather than filing another` };
+  }
+  if (CLOSING_REFERENCE(input.parentIssue).test(issue.body)) {
+    return { status: "rejected", reason: `follow-up issue ${issue.url} must reference #${input.parentIssue} without a closing keyword; edit that issue rather than filing another` };
+  }
+  return { status: "verified", number: issue.number, url: issue.url };
 };

@@ -391,6 +391,36 @@ describe("derived decision state", () => {
     };
     expect(consensusDerivedSchema.safeParse(value).success).toBe(false);
   });
+
+  it("records a revision-limit conclusion only at the final round, with ordered objectors", () => {
+    const unanimous = {
+      ...base,
+      kind: "consensus" as const,
+      algorithm: "unanimous-active-roster-v1" as const,
+      decisionId: `consensus:${inputSetHash}:r3`,
+      round: 3,
+      consensusPin: "b".repeat(40)
+    };
+    const concluded = {
+      ...unanimous,
+      activeRoster: ["claude", "codex", "cursor"],
+      algorithm: "revision-limit-active-roster-v1" as const,
+      objectors: [{ agent: "claude", disposition: "revise" as const }, { agent: "cursor", disposition: "escalate" as const }]
+    };
+    // Existing persisted unanimous records still load unchanged.
+    expect(consensusDerivedSchema.safeParse(unanimous).success).toBe(true);
+    expect(consensusDerivedSchema.safeParse(concluded).success).toBe(true);
+    const malformed = [
+      { ...unanimous, objectors: concluded.objectors },
+      { ...concluded, objectors: undefined },
+      { ...concluded, objectors: [] },
+      { ...concluded, round: 2, decisionId: `consensus:${inputSetHash}:r2` },
+      { ...concluded, objectors: [...concluded.objectors].reverse() },
+      { ...concluded, objectors: [{ agent: "antigravity", disposition: "revise" as const }] },
+      { ...concluded, objectors: [{ agent: "claude", disposition: "approve" }] }
+    ];
+    for (const value of malformed) expect(consensusDerivedSchema.safeParse(value).success).toBe(false);
+  });
 });
 
 const configFixture = (contextPaths?: unknown) => ({

@@ -45,7 +45,7 @@ import {
   pruneSupersededWorktrees,
   worktreeLabelsFor
 } from "./materializedInputs.js";
-import { renderArtifactScaffold } from "./orderScaffold.js";
+import { renderArtifactScaffold, type FollowUpFiling } from "./orderScaffold.js";
 import {
   agentResponsePath,
   agentRuntimePaths,
@@ -80,7 +80,9 @@ import {
   releaseResourceHold,
   replaceCursor,
   requireStateMutation,
+  REVISION_LIMIT_ALGORITHM,
   StateConflictError,
+  UNANIMOUS_CONSENSUS_ALGORITHM,
   type AcceptedResponse,
   type AcceptedSubmission,
   type BallotBatch,
@@ -111,9 +113,14 @@ import {
   type WorkflowStepId
 } from "./steps.js";
 import { containmentPolicy, ingestContainmentProbe } from "./shellGuard.js";
-import { holdRecoveryCommand, holdDescription, issueCommand, renderIssueReport } from "./issueReport.js";
+import { holdRecoveryCommand, holdDescription, issueCommand, renderIssueReport, revisionLimitCloseout } from "./issueReport.js";
 import { inspectStartupAgent } from "./doctor.js";
-import { formatFinalizationPullRequest, githubRepositoryFromOrigin, readGitHubIssueSnapshot } from "./githubIssue.js";
+import {
+  formatFinalizationPullRequest,
+  githubRepositoryFromOrigin,
+  readGitHubIssueSnapshot,
+  verifyFollowUpIssue
+} from "./githubIssue.js";
 import { prepareAgentIssueBranches } from "./prepareAgentBranch.js";
 import { harnessPromptReadiness, TmuxController, type IdleOverride } from "./tmux.js";
 import { sha256, sha256OfFile } from "./hash.js";
@@ -362,7 +369,7 @@ const canonicalDerivedCitation = (citation: DerivedInputCitation): string =>
  * can alias another decision.
  */
 export const computeDerivedInputSetHash = (
-  kind: "plan-selection" | "implementation-selection" | "consensus",
+  kind: "plan-selection" | "implementation-selection" | "consensus" | "consensus-revision-limit",
   activeRoster: readonly string[],
   inputs: readonly DerivedInputCitation[],
   round?: number | null
@@ -474,30 +481,47 @@ export const computeImplementationSelectionDerived = (
   };
 };
 
-export const computeConsensusDerived = (
+/**
+ * The consensus decision for one revision round, citing the authorized
+ * revision and every active ballot of `batch`. Unanimous approval keeps the
+ * original algorithm and identity. Objections produce a decision only when
+ * `concludes` (the final allowed round): the revision is still the
+ * finalization base, and each objector is recorded with its own disposition.
+ */
+const consensusRecord = (
   cursors: CursorsState,
   round: number,
   now: string,
-  supersedes = cursors.derived.consensus?.decisionId ?? null
+  supersedes: string | null,
+  batch: BallotBatch | null,
+  concludes: boolean
 ): ConsensusDerived | null => {
   const revision = acceptedAt(cursors, "R6.revise", true, round).find(
     (submission) => submission.agent === cursors.derived.implementationSelection?.reviser
   );
   if (revision?.productPin === undefined) return null;
   const ballots = acceptedResponsesAt(cursors, "R6.ballot", true, round);
-  if (!hasCompleteActiveDenominator(cursors, ballots) || ballots.some((ballot) => ballot.disposition !== "approve")) {
-    return null;
+  if (!hasCompleteActiveDenominator(cursors, ballots) || batch === null) return null;
+  const objectors: { agent: string; disposition: "revise" | "escalate" }[] = [];
+  for (const agent of cursors.activeRoster) {
+    const disposition = ballots.find((ballot) => ballot.agent === agent)?.disposition;
+    if (disposition === undefined) return null;
+    if (disposition !== "approve") objectors.push({ agent, disposition });
   }
-  const batch = publishedBallotBatch(cursors, "R6.ballot", round);
-  if (batch === null) return null;
+  if (objectors.length > 0 && !concludes) return null;
   const inputs = [
     submissionCitation(revision, "revision"),
     ...ballots.map((response) => responseCitation(response, "consensus-ballot", batch))
   ];
-  const inputSetHash = computeDerivedInputSetHash("consensus", cursors.activeRoster, inputs, round);
+  const limited = objectors.length > 0;
+  // The policy is part of the hash domain, so a concluded decision can never
+  // alias a unanimous one over the same citations.
+  const inputSetHash = computeDerivedInputSetHash(
+    limited ? "consensus-revision-limit" : "consensus", cursors.activeRoster, inputs, round
+  );
   return {
     kind: "consensus",
-    algorithm: "unanimous-active-roster-v1",
+    algorithm: limited ? REVISION_LIMIT_ALGORITHM : UNANIMOUS_CONSENSUS_ALGORITHM,
     inputSetHash,
     activeRoster: [...cursors.activeRoster],
     inputs,
@@ -505,8 +529,43 @@ export const computeConsensusDerived = (
     supersedes,
     decidedAt: now,
     round,
-    consensusPin: revision.productPin
+    consensusPin: revision.productPin,
+    ...(limited ? { objectors } : {})
   };
+};
+
+export const computeConsensusDerived = (
+  cursors: CursorsState,
+  round: number,
+  now: string,
+  supersedes: string | null,
+  maxRevisionRounds: number
+): ConsensusDerived | null =>
+  consensusRecord(cursors, round, now, supersedes, publishedBallotBatch(cursors, "R6.ballot", round),
+    round >= maxRevisionRounds);
+
+/**
+ * Rebuild a revision-limit decision after a drop. The final round's ballots
+ * are already published; the remaining agents' entries in that same batch are
+ * the evidence, so no ballot is reopened and no earlier selection is redone.
+ */
+export const computeTerminalConsensusDerived = (
+  cursors: CursorsState,
+  prior: ConsensusDerived,
+  now: string
+): ConsensusDerived | null => {
+  const commits = new Set(
+    prior.inputs.filter((input) => input.kind === "consensus-ballot").map((input) => input.evidenceCommitSha)
+  );
+  const batch = cursors.ballotBatches.find((candidate) =>
+    candidate.kind === "consensus-ballot-batch" && candidate.round === prior.round &&
+    candidate.status === "published" && commits.has(candidate.commitSha)
+  ) ?? null;
+  const covered = batch !== null && acceptedResponsesAt(cursors, "R6.ballot", true, prior.round).every((response) =>
+    batch.responses.some((entry) => entry.agent === response.agent && entry.actionId === response.actionId &&
+      entry.responseSha256 === response.responseSha256)
+  );
+  return covered ? consensusRecord(cursors, prior.round, now, prior.decisionId, batch, true) : null;
 };
 
 type DerivedDecisionRecord = PlanSelectionDerived | ImplementationSelectionDerived | ConsensusDerived;
@@ -527,7 +586,11 @@ export const derivedDecisionJournalDetails = (record: DerivedDecisionRecord): Re
           implementationPin: record.implementationPin,
           reviser: record.reviser
         }
-      : { round: record.round, consensusPin: record.consensusPin })
+      : {
+          round: record.round,
+          consensusPin: record.consensusPin,
+          ...(record.objectors === undefined ? {} : { objectors: record.objectors.map((objector) => ({ ...objector })) })
+        })
 });
 
 export const deriveBoundInputs = (
@@ -582,6 +645,18 @@ export const deriveBoundInputs = (
   if (stepId === "R6.ballot") {
     return acceptedAt(cursors, "R6.revise", true, round).map((value) => inputFromSubmission(value, "revision", true));
   }
+  if (stepId === "R6.follow-up") {
+    // The exact final revision and the published ballots that concluded on it.
+    const consensus = cursors.derived.consensus;
+    if (consensus === null || consensus.round !== round) return [];
+    return consensus.inputs.flatMap((input): BoundInput[] =>
+      input.kind === "revision" && input.productPin !== undefined
+        ? [{ agent: input.agent, commitSha: input.productPin, path: input.path, kind: "revision" }]
+        : input.kind === "consensus-ballot" && input.evidenceCommitSha !== undefined
+          ? [{ agent: input.agent, commitSha: input.evidenceCommitSha, path: input.path, kind: "consensus-ballot" }]
+          : []
+    );
+  }
   if (stepId === "R7.finalize") {
     const consensus = cursors.derived.consensus;
     if (consensus !== null) {
@@ -605,6 +680,24 @@ export const deriveBoundInputs = (
     return accepted === undefined ? [] : [inputFromSubmission(accepted, "consensus", true)];
   }
   return [];
+};
+
+/**
+ * Identifies one objector's follow-up for one final revision. Unlike the
+ * action id it survives reissue, so a retried filing finds its own issue.
+ */
+export const followUpFilingKey = (issueSessionId: string, agent: string, revisionSha: string): string =>
+  `coord-follow-up-${sha256(["follow-up-filing-v1", issueSessionId, agent, revisionSha].map(lengthPrefixed).join("")).slice(0, 16)}`;
+
+const followUpFiling = (start: StartState, cursors: CursorsState, agent: string): FollowUpFiling | undefined => {
+  const consensus = cursors.derived.consensus;
+  if (consensus === null) return undefined;
+  return {
+    repository: githubRepositoryFromOrigin(start.origin),
+    parentIssue: start.issue,
+    revisionSha: consensus.consensusPin,
+    filingKey: followUpFilingKey(start.issueSessionId, agent, consensus.consensusPin)
+  };
 };
 
 const selectedPlanAgents = (cursors: CursorsState): string[] => {
@@ -765,6 +858,7 @@ export const buildOrder = (
       : stepId === "R5.compare-ballot"
         ? implementationChoices
         : [];
+  const followUp = stepId === "R6.follow-up" ? followUpFiling(start, cursors, agent) : undefined;
   const scaffold = renderArtifactScaffold({
     stepId,
     issue: start.issue,
@@ -777,7 +871,10 @@ export const buildOrder = (
     round,
     approvedPaths,
     actionId,
-    scopeHash
+    scopeHash,
+    ...(followUp === undefined ? {} : { followUp }),
+    ...(stepId === "R7.finalize" && cursors.derived.consensus?.algorithm === REVISION_LIMIT_ALGORITHM
+      ? { concludedWithObjections: true } : {})
   });
   const binding =
     scaffold === ""
@@ -1940,7 +2037,8 @@ export class CoordinatorRunLoop {
       ...(decision.choice === undefined ? {} : { choice: decision.choice }),
       ...(decision.checkResults === undefined
         ? {}
-        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) })
+        : { checkResults: decision.checkResults.map((result) => ({ ...result, argv: [...result.argv] })) }),
+      ...(decision.followUpIssue === undefined ? {} : { followUpIssue: { ...decision.followUpIssue } })
     };
     const withoutPrior = cursors.accepted.filter(
       (item) => !(item.stepId === accepted.stepId && item.agent === accepted.agent && item.round === accepted.round)
@@ -2634,6 +2732,40 @@ export class CoordinatorRunLoop {
     return { ...observation, checkResults: verified.results };
   }
 
+  /**
+   * A follow-up receipt is accepted only for a real issue on GitHub. A lookup
+   * that fails keeps the receipt and retries; it never reissues the action,
+   * because a reissued action would ask the objector to file again.
+   */
+  async verifyFollowUpObservation(
+    start: StartState,
+    order: InternalOrder,
+    observation: EvidenceObservation,
+    cursors: CursorsState
+  ): Promise<EvidenceObservation> {
+    if (order.stepId !== "R6.follow-up" || observation.status !== "satisfied") return observation;
+    const claimed = observation.followUpIssue;
+    const revision = order.inputs.find((input) => input.kind === "revision");
+    if (claimed === undefined || revision === undefined) {
+      return { ...observation, status: "rejected", outstanding: ["follow-up receipt does not cite an issue for the bound final revision"] };
+    }
+    const result = await verifyFollowUpIssue({
+      origin: start.origin,
+      parentIssue: start.issue,
+      claimedUrl: claimed.url,
+      revisionSha: revision.commitSha,
+      filingKey: followUpFilingKey(start.issueSessionId, order.agent, revision.commitSha),
+      cwd: this.paths.issueRoot,
+      runner: this.processRunner
+    });
+    this.authority(cursors);
+    if (result.status === "verified") return { ...observation, followUpIssue: { number: result.number, url: result.url } };
+    if (result.status === "unavailable") {
+      return { ...observation, status: "retry", outstanding: [`GitHub lookup of ${claimed.url} failed; retrying: ${result.reason}`] };
+    }
+    return { ...observation, status: "rejected", outstanding: [result.reason] };
+  }
+
   private async runGateVerification(
     start: StartState,
     order: InternalOrder,
@@ -2682,13 +2814,15 @@ export class CoordinatorRunLoop {
       this.log(`[OK] Final branch ${branch} pushed.`);
       this.authority(authority, true);
       const draft = !coordMergesPullRequest(start.prPolicy);
+      const closeout = revisionLimitCloseout(cursors);
       const { title, body } = formatFinalizationPullRequest({
         issue: start.issue,
         title: issueSnapshot.title,
         finalSha,
         draft,
         evidenceBranch: cursors.evidence.branch,
-        evidenceTip: cursors.evidence.tip
+        evidenceTip: cursors.evidence.tip,
+        ...(closeout === null ? {} : { closeout })
       });
       this.log("[WAIT] Opening the pull request...");
       const result = await this.pullRequestOpener({
@@ -2838,18 +2972,34 @@ export class CoordinatorRunLoop {
   }
 
   private applyDerivedConsensus(start: StartState, cursors: CursorsState, round: number): CursorsState {
+    // Objections that outlived the final round are owed as follow-up issues
+    // before finalization; unanimous approval finalizes directly.
+    const preview = computeConsensusDerived(cursors, round, this.now(), null, start.maxRevisionRounds);
     return this.persistDerivedDecision(
       start,
       cursors,
       "consensus",
-      (current, now, supersedes) => computeConsensusDerived(current, round, now, supersedes),
-      {
-      type: "advance-step",
-      from: "R6.ballot",
-      to: "R7.finalize",
-      round: null
-      }
+      (current, now, supersedes) => computeConsensusDerived(current, round, now, supersedes, start.maxRevisionRounds),
+      preview?.algorithm === REVISION_LIMIT_ALGORITHM
+        ? { type: "advance-step", from: "R6.ballot", to: "R6.follow-up", round }
+        : { type: "advance-step", from: "R6.ballot", to: "R7.finalize", round: null }
     );
+  }
+
+  /** Clear only the named obsolete question; ballots, pauses and holds are untouched. */
+  private retireOwnerQuestion(
+    cursors: CursorsState,
+    decision: Extract<MachineDecision, { type: "retire-owner-question" }>
+  ): CursorsState {
+    return this.mutate(cursors, (current) => {
+      if (current.ownerQuestion?.id !== decision.questionId) return current;
+      appendJournal(this.paths, { type: "owner-question", details: {
+        id: decision.questionId, kind: decision.kind, round: decision.round, retired: true,
+        reason: "the final revision round concludes the issue; objections become follow-up issues",
+        eventId: `owner-question-retired:${decision.questionId}`
+      } }, this.now());
+      return cursorsStateSchema.parse({ ...current, ownerQuestion: null, updatedAt: this.now() });
+    });
   }
 
   private async applyDecisions(start: StartState, cursors: CursorsState, decisions: readonly MachineDecision[]): Promise<CursorsState> {
@@ -2890,6 +3040,8 @@ export class CoordinatorRunLoop {
         next = this.applyDerivedImplementationSelection(start, next);
       } else if (decision.type === "derive-consensus") {
         next = this.applyDerivedConsensus(start, next, decision.round);
+      } else if (decision.type === "retire-owner-question") {
+        next = this.retireOwnerQuestion(next, decision);
       } else if (decision.type === "advance-step") {
         this.logPhase(start.issue, decision.to, decision.round, decision.from);
         next = this.advance(next, decision);
@@ -3138,6 +3290,8 @@ export class CoordinatorRunLoop {
       observation = await this.verifyFinalizationChecks(start, order, observation, cursors);
       this.authority(cursors);
       observation = await this.verifyCandidateChecks(start, order, observation, cursors);
+      this.authority(cursors);
+      observation = await this.verifyFollowUpObservation(start, order, observation, cursors);
       this.authority(cursors);
       observations.push(observation);
       }

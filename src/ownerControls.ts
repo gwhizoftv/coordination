@@ -4,9 +4,9 @@ import { clearCompletion } from "./action.js";
 import { clearAgentResponse } from "./ballotResponse.js";
 import { agentResponsePath, agentRuntimePaths, type IssueRuntimePaths } from "./paths.js";
 import { computeConsensusDerived, computeImplementationSelectionDerived, computePlanSelectionDerived,
-  derivedDecisionJournalDetails } from "./runLoop.js";
+  computeTerminalConsensusDerived, derivedDecisionJournalDetails } from "./runLoop.js";
 import { appendJournal, cursorsStateSchema, dropAgent, enqueueOwnerGuidance, mutateCursorsState,
-  readStartState, replaceCursor, resetOwnerGuidance, setPaused, releaseHold,
+  readStartState, replaceCursor, resetOwnerGuidance, setPaused, releaseHold, REVISION_LIMIT_ALGORITHM,
   type BallotBatch, type CursorsState } from "./state.js";
 import { STEP_DEFINITIONS, roundForStep, type WorkflowStepId } from "./steps.js";
 
@@ -144,11 +144,35 @@ const rederiveAfterDrop = (
   };
 
   let reset = false;
-  if (priorPlan !== null) {
+  // Once the final revision round has concluded, the plan, implementation and
+  // revision are settled. A drop must not redo those selections (with fewer
+  // voters their published batches no longer match and would rewind the
+  // issue); only the terminal decision is rebuilt for the remaining roster.
+  const terminal = priorConsensus !== null && priorConsensus.algorithm === REVISION_LIMIT_ALGORITHM;
+  if (terminal) {
+    next = cursorsStateSchema.parse({
+      ...next,
+      derived: { ...next.derived, planSelection: priorPlan, implementationSelection: priorImplementation },
+      updatedAt: now
+    });
+    const consensus = computeTerminalConsensusDerived(next, priorConsensus, now);
+    if (consensus === null) {
+      next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R6.follow-up" || step === "R7.finalize");
+      reset = true;
+    } else {
+      next = cursorsStateSchema.parse({
+        ...next,
+        derived: { ...next.derived, consensus: persistDecision(consensus) },
+        updatedAt: now
+      });
+    }
+  }
+
+  if (!terminal && priorPlan !== null) {
     if (next.activeRoster.length === 1) {
       if (priorPlan.selectedAgents[0] !== next.activeRoster[0]) {
         next = resetTo(next, "R4.implement", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
@@ -156,7 +180,7 @@ const rederiveAfterDrop = (
       const plan = computePlanSelectionDerived(next, now, priorPlan.decisionId);
       if (plan === null) {
         next = resetTo(next, "R3.plan-ballot", null, (step) =>
-          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       } else {
@@ -167,7 +191,7 @@ const rederiveAfterDrop = (
         });
         if (plan.selectedAgents[0] !== priorPlan.selectedAgents[0]) {
           next = resetTo(next, "R4.implement", null, (step) =>
-            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+            ["R4.implement", "R5.compare", "R5.compare-ballot", "R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
           );
           reset = true;
         }
@@ -175,11 +199,11 @@ const rederiveAfterDrop = (
     }
   }
 
-  if (!reset && priorImplementation !== null && next.activeRoster.length > 1) {
+  if (!terminal && !reset && priorImplementation !== null && next.activeRoster.length > 1) {
     const implementation = computeImplementationSelectionDerived(next, now, priorImplementation.decisionId);
     if (implementation === null) {
       next = resetTo(next, "R5.compare-ballot", null, (step) =>
-        ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+        ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
       );
       reset = true;
     } else {
@@ -193,15 +217,17 @@ const rederiveAfterDrop = (
         implementation.implementationPin !== priorImplementation.implementationPin
       ) {
         next = resetTo(next, "R6.revise", 1, (step) =>
-          ["R6.revise", "R6.ballot", "R7.finalize"].includes(step)
+          ["R6.revise", "R6.ballot", "R6.follow-up", "R7.finalize"].includes(step)
         );
         reset = true;
       }
     }
   }
 
-  if (!reset && priorConsensus !== null && next.activeRoster.length > 1) {
-    const consensus = computeConsensusDerived(next, priorConsensus.round, now, priorConsensus.decisionId);
+  if (!terminal && !reset && priorConsensus !== null && next.activeRoster.length > 1) {
+    const consensus = computeConsensusDerived(
+      next, priorConsensus.round, now, priorConsensus.decisionId, readStartState(paths).maxRevisionRounds
+    );
     if (consensus === null) {
       next = resetTo(next, "R6.ballot", priorConsensus.round, (step) => step === "R7.finalize");
       reset = true;

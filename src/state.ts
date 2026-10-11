@@ -62,6 +62,7 @@ const stepIdSchema = z.enum([
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ]);
 const gateIdSchema = z.enum([
@@ -84,6 +85,7 @@ const evidenceIdSchema = z.enum([
   "comparison-response-accepted",
   "revision-pinned",
   "consensus-response-accepted",
+  "follow-up-published",
   "finalization-verified"
 ]);
 const ballotStepIdSchema = z.enum(["R3.plan-ballot", "R5.compare-ballot", "R6.ballot", "R4.amend-ballot"]);
@@ -582,19 +584,48 @@ export const implementationSelectionDerivedSchema = derivedDecisionBaseSchema
     message: "decision identity must match the implementation-selection input hash"
   });
 
+/** Every active ballot approved the revision. */
+export const UNANIMOUS_CONSENSUS_ALGORITHM = "unanimous-active-roster-v1";
+/**
+ * The final allowed revision round ended with objections. The revision is
+ * still the finalization base; the objections are recorded, not approved.
+ */
+export const REVISION_LIMIT_ALGORITHM = "revision-limit-active-roster-v1";
+
+const consensusObjectorSchema = z
+  .object({ agent: agentIdSchema, disposition: z.enum(["revise", "escalate"]) })
+  .strict();
+
 export const consensusDerivedSchema = derivedDecisionBaseSchema
   .extend({
     kind: z.literal("consensus"),
-    algorithm: z.literal("unanimous-active-roster-v1"),
+    algorithm: z.enum([UNANIMOUS_CONSENSUS_ALGORITHM, REVISION_LIMIT_ALGORITHM]),
     decisionId: consensusDecisionIdSchema,
     supersedes: consensusDecisionIdSchema.nullable(),
     round: z.number().int().min(1),
-    consensusPin: gitShaSchema
+    consensusPin: gitShaSchema,
+    /** Revision-limit decisions only: active objectors in roster order, with their own dispositions. */
+    objectors: z.array(consensusObjectorSchema).min(1).optional()
   })
   .strict()
   .refine((record) => record.decisionId === `consensus:${record.inputSetHash}:r${record.round}`, {
     path: ["decisionId"],
     message: "decision identity must match the consensus input hash and round"
+  })
+  .refine((record) => (record.algorithm === REVISION_LIMIT_ALGORITHM) === (record.objectors !== undefined), {
+    path: ["objectors"],
+    message: "objectors are recorded exactly when the revision limit concluded the issue"
+  })
+  .refine((record) => record.algorithm !== REVISION_LIMIT_ALGORITHM || record.round === DEFAULT_MAX_REVISION_ROUNDS, {
+    path: ["round"],
+    message: `a revision-limit decision concludes revision round ${DEFAULT_MAX_REVISION_ROUNDS} only`
+  })
+  .refine((record) => {
+    const order = (record.objectors ?? []).map((objector) => record.activeRoster.indexOf(objector.agent));
+    return order.every((index, position) => index >= 0 && (position === 0 || index > order[position - 1]!));
+  }, {
+    path: ["objectors"],
+    message: "objectors must be unique active agents in roster order"
   });
 
 export const derivedStateSchema = z
@@ -631,6 +662,8 @@ export const acceptedSubmissionSchema = z
           .strict()
       )
       .optional(),
+    /** Follow-up receipts only: the GitHub issue the coordinator verified. */
+    followUpIssue: z.object({ number: issueSchema, url: z.string().url() }).strict().optional(),
     path: z.string().min(1),
     acceptedAt: timestampSchema
   })

@@ -339,6 +339,49 @@ Implement it.
     });
   });
 
+  it("binds a follow-up issue receipt to its action, round, final revision, and inputs", async () => {
+    const inputs = [
+      { agent: "claude", commitSha: sha("d"), path: ".signals/issue-1/revision-ready-claude-round-3.json", kind: "revision" },
+      { agent: "codex", commitSha: sha("9"), path: ".code-reviews/issue-1/consensus-ballot-codex-round-3.json", kind: "consensus-ballot" }
+    ];
+    const action = order({
+      stepId: "R6.follow-up",
+      evidenceId: "follow-up-published",
+      requiredPath: ".signals/issue-1/follow-up-ready-codex-round-3.json",
+      round: 3,
+      inputs
+    });
+    const receipt = {
+      protocolVersion: 1,
+      artifact: "follow-up-ready",
+      issue: 1,
+      issueSessionId: action.issueSessionId,
+      agent: "codex",
+      actionId: action.actionId,
+      inputSetHash: computeInputSetHash(inputs),
+      round: 3,
+      revisionCommitSha: sha("d"),
+      followUpIssueUrl: "https://github.com/example/project/issues/42"
+    };
+    expect(await evaluateEvidence(action, sha("e"), mirror(JSON.stringify(receipt)))).toMatchObject({
+      status: "satisfied",
+      followUpIssue: { number: 42, url: receipt.followUpIssueUrl }
+    });
+    for (const patch of [
+      { actionId: "10000000-0000-4000-8000-000000000001" },
+      { round: 2 },
+      { revisionCommitSha: sha("8") },
+      { inputSetHash: "c".repeat(64) },
+      { issueSessionId: "other" },
+      { followUpIssueUrl: "https://example.com/issues/42" },
+      { followUpIssueUrl: "<https://github.com/OWNER/REPO/issues/NUMBER of the issue you filed>" }
+    ]) {
+      const result = await evaluateEvidence(action, sha("e"), mirror(JSON.stringify({ ...receipt, ...patch })));
+      expect(result.status, JSON.stringify(patch)).toBe("rejected");
+      expect(result.followUpIssue).toBeUndefined();
+    }
+  });
+
   it("rejects implementation paths outside the selected plan map", async () => {
     const inputs = [{ agent: "codex", commitSha: sha("2"), path: ".plans/issue-1/plan.md", kind: "selected-plan" }];
     const action = order({

@@ -191,6 +191,55 @@ describe("issue report", () => {
     );
   });
 
+  it("reports a revision-limit conclusion with filed, outstanding, and dropped follow-ups only after the decision", () => {
+    const ballot = (agent: string, disposition: "approve" | "revise" | "escalate") => ({
+      stepId: "R6.ballot" as const, agent, actionId: "10000000-0000-4000-8000-000000000001", round: 3,
+      responseSha256: "e".repeat(64), rationale: `${agent} private reasoning`, disposition,
+      path: `.code-reviews/issue-1/consensus-ballot-${agent}-round-3.json`, acceptedAt: "2026-08-13T00:00:00.000Z"
+    });
+    const base = complete();
+    const pending = {
+      ...base,
+      completed: false,
+      issueCursor: { stepId: "R6.follow-up" as const, gateId: "gate-6-consensus" as const, round: 3 },
+      activeRoster: ["cursor", "codex"],
+      droppedAgents: ["claude"],
+      acceptedResponses: [ballot("cursor", "approve"), ballot("codex", "revise"), ballot("claude", "escalate")]
+    };
+    // Before the decision the ballots are not reported, even though they are recorded.
+    const undecided = renderIssueReport(start("coord-open-unmerged"), pending);
+    expect(undecided).not.toContain("Revision limit");
+    expect(undecided).not.toContain("revise");
+    const inputSetHash = "a".repeat(64);
+    const decided = {
+      ...pending,
+      derived: {
+        ...base.derived,
+        consensus: {
+          kind: "consensus" as const, algorithm: "revision-limit-active-roster-v1" as const, inputSetHash,
+          activeRoster: ["cursor", "codex"], inputs: base.derived.implementationSelection!.inputs,
+          decisionId: `consensus:${inputSetHash}:r3`, supersedes: null, decidedAt: "2026-08-13T00:00:00.000Z",
+          round: 3, consensusPin: impl, objectors: [{ agent: "codex", disposition: "revise" as const }]
+        }
+      }
+    };
+    const report = renderIssueReport(start("coord-open-unmerged"), decided);
+    expect(report).toContain("[WAIT] Issue 1: filing follow-up issues for remaining objections");
+    expect(report).toContain("Revision limit: round 3 concluded with objections on record; follow-up issues:");
+    expect(report).toContain("  codex: not filed yet");
+    expect(report).toContain("  claude: dropped before filing");
+    expect(report).not.toContain("private reasoning");
+    const filed = renderIssueReport(start("coord-open-unmerged"), {
+      ...decided,
+      accepted: [...decided.accepted, {
+        stepId: "R6.follow-up" as const, agent: "codex", round: 3, submissionSha: "9".repeat(40),
+        followUpIssue: { number: 180, url: "https://github.com/example/project/issues/180" },
+        path: ".signals/issue-1/follow-up-ready-codex-round-3.json", acceptedAt: "2026-08-13T00:00:00.000Z"
+      }]
+    });
+    expect(filed).toContain("  codex: https://github.com/example/project/issues/180");
+  });
+
   it("shows delivery, execution, health, queue, and background state", () => {
     const lifecycle = initialAgentLifecycle(["cursor"], "2026-08-13T00:00:00.000Z");
     lifecycle.agents.cursor = {

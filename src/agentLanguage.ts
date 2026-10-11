@@ -31,6 +31,7 @@ const EVIDENCE_IDS: readonly EvidenceId[] = [
   "comparison-response-accepted",
   "revision-pinned",
   "consensus-response-accepted",
+  "follow-up-published",
   "finalization-verified"
 ];
 
@@ -126,6 +127,7 @@ const AGENT_FACING_SUBJECT: Readonly<Record<EvidenceId, string>> = {
   "comparison-response-accepted": "the comparison ballot",
   "revision-pinned": "the revision signal",
   "consensus-response-accepted": "the consensus ballot",
+  "follow-up-published": "the follow-up issue receipt",
   "finalization-verified": "the finalization signal"
 };
 

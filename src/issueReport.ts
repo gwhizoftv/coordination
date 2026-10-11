@@ -1,4 +1,5 @@
-import type { BallotBatch, CursorsState, StartState } from "./state.js";
+import { REVISION_LIMIT_ALGORITHM, type BallotBatch, type CursorsState, type StartState } from "./state.js";
+import type { CloseoutObjection } from "./githubIssue.js";
 import { coordMergesPullRequest, describeWorkflowStep, type WorkflowStepId } from "./steps.js";
 import { containmentCoverage, stopObservationWarning } from "./agentLifecycle.js";
 import { containmentPolicy } from "./shellGuard.js";
@@ -11,7 +12,8 @@ const stageNames: Record<WorkflowStepId, string> = {
   "R1.join": "checking agent readiness", "R2.plan": "writing plans", "R3.review": "reviewing plans",
   "R3.plan-ballot": "choosing a plan", "R4.implement": "implementing", "R4.amend-ballot": "reviewing scope changes",
   "R5.compare": "reviewing implementations", "R5.compare-ballot": "choosing an implementation",
-  "R6.revise": "revising", "R6.ballot": "reviewing the revision", "R7.finalize": "finalizing"
+  "R6.revise": "revising", "R6.ballot": "reviewing the revision",
+  "R6.follow-up": "filing follow-up issues for remaining objections", "R7.finalize": "finalizing"
 };
 
 export const holdDescription = (reason: CursorsState["holds"][number]["reason"]): string => ({
@@ -22,6 +24,29 @@ export const holdDescription = (reason: CursorsState["holds"][number]["reason"])
   "vendor-failure": "the agent application reported a failure; inspect its terminal",
   unobservable: "the terminal cannot be inspected; restore terminal access before releasing this hold"
 })[reason];
+
+/**
+ * Objections recorded when the revision limit concluded the issue, with each
+ * objector's verified follow-up issue. Objectors dropped since the final ballot
+ * are reported from the published ballot evidence, never as approvals.
+ */
+export const revisionLimitCloseout = (
+  cursors: CursorsState
+): { round: number; objections: CloseoutObjection[] } | null => {
+  const consensus = cursors.derived.consensus;
+  if (consensus === null) return null;
+  const ballots = cursors.acceptedResponses.filter(
+    (response) => response.stepId === "R6.ballot" && response.round === consensus.round
+  );
+  const objections = ballots.flatMap((ballot): CloseoutObjection[] => {
+    if (ballot.disposition !== "revise" && ballot.disposition !== "escalate") return [];
+    const receipt = cursors.accepted.find((submission) => submission.stepId === "R6.follow-up" &&
+      submission.agent === ballot.agent && submission.round === consensus.round);
+    return [{ agent: ballot.agent, disposition: ballot.disposition, followUp: receipt?.followUpIssue ?? null }];
+  });
+  if (consensus.algorithm !== REVISION_LIMIT_ALGORITHM && objections.length === 0) return null;
+  return { round: consensus.round, objections };
+};
 
 const finalization = (cursors: CursorsState) =>
   [...cursors.accepted].reverse().find((submission) => submission.stepId === "R7.finalize");
@@ -149,6 +174,16 @@ export const renderIssueReport = (
   }
   if (cursors.publication.error !== null && cursors.publication.status === "failed") {
     lines.push(`Error: ${cursors.publication.error}`);
+  }
+
+  // Shown only once the final ballots are published and the decision derived.
+  const closeout = revisionLimitCloseout(cursors);
+  if (closeout !== null) {
+    lines.push(`Revision limit: round ${closeout.round} concluded with objections on record; follow-up issues:`);
+    for (const objection of closeout.objections) {
+      lines.push(`  ${objection.agent}: ${objection.followUp !== null ? objection.followUp.url
+        : cursors.activeRoster.includes(objection.agent) ? "not filed yet" : "dropped before filing"}`);
+    }
   }
 
   const evidenceBranch = cursors.evidence.branch;

@@ -31,8 +31,10 @@ The artwork is an overview; the default **consensus** profile works as follows:
 3. **Implement and compare.** Every active agent implements the selected plan
    in its own clone. Peers review the implementations and ballot on a choice.
 4. **Revise toward agreement.** One selected reviser addresses the feedback;
-   peers ballot on the revision, for up to three rounds. Escalations and the
-   revision limit require an owner decision rather than silent advancement.
+   peers ballot on the revision, for up to three rounds. Escalations before
+   the last round require an owner decision. At the last round the revision is
+   finalized; each agent that still objects files its remaining objections as
+   a follow-up GitHub issue, linked from the PR.
 5. **Verify the result.** Finalization removes current-issue coordination
    artifacts and runs every configured check on a clean detached worktree at
    the exact cleanup commit. A failed check blocks PR publication.

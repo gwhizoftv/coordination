@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { artifactScaffoldValue, renderArtifactScaffold } from "../src/orderScaffold.js";
-import { planAmendmentRequestSchema } from "../src/protocol.js";
+import { followUpReadyArtifactSchema, planAmendmentRequestSchema } from "../src/protocol.js";
+import { computeInputSetHash } from "../src/evidence.js";
 import { BUILD_DISCIPLINE_NOTE, STEP_DEFINITIONS } from "../src/steps.js";
 
 describe("orderScaffold", () => {
@@ -175,6 +176,37 @@ describe("orderScaffold", () => {
       disposition: "approve",
       rationale: "<one sentence>"
     });
+  });
+
+  it("fills the follow-up receipt and tells the objector how to file and find its own issue", () => {
+    const inputs = [{ kind: "revision", agent: "claude", commitSha: "d".repeat(40), path: ".signals/issue-177/revision-ready-claude-round-3.json" }];
+    const ctx = {
+      stepId: "R6.follow-up" as const, issue: 177, issueSessionId: "issue-177:s", agent: "codex",
+      actionId: "10000000-0000-4000-8000-000000000001", baselineSha: "a".repeat(40), automationDigest: "b".repeat(64),
+      inputs, eligibleChoices: [], round: 3, approvedPaths: [],
+      followUp: { repository: "acme/app", parentIssue: 177, revisionSha: "d".repeat(40), filingKey: "coord-follow-up-0123456789abcdef" }
+    };
+    const value = artifactScaffoldValue(ctx)!;
+    expect(value).toMatchObject({
+      artifact: "follow-up-ready", actionId: ctx.actionId, round: 3, revisionCommitSha: "d".repeat(40),
+      inputSetHash: computeInputSetHash(inputs)
+    });
+    // Only the agent-authored URL is left to fill in.
+    expect(followUpReadyArtifactSchema.safeParse(value).success).toBe(false);
+    expect(followUpReadyArtifactSchema.parse({ ...value, followUpIssueUrl: "https://github.com/acme/app/issues/180" }))
+      .toMatchObject({ agent: "codex" });
+    const rendered = renderArtifactScaffold(ctx);
+    expect(rendered).toContain('gh issue list --repo acme/app --state all --search "coord-follow-up-0123456789abcdef in:body"');
+    expect(rendered).toContain("gh issue create --repo acme/app");
+    expect(rendered).toContain("--body-file");
+    expect(rendered).toContain("`Follow-up to #177 (https://github.com/acme/app/issues/177)`");
+    expect(rendered).toContain("not a closing keyword");
+    expect(rendered).toContain(`final revision ${"d".repeat(40)}`);
+    expect(rendered).toContain("search again before creating another");
+    const finalize = renderArtifactScaffold({ ...ctx, stepId: "R7.finalize", round: null, followUp: undefined, concludedWithObjections: true });
+    expect(finalize).toContain("concluded with objections on record");
+    expect(renderArtifactScaffold({ ...ctx, stepId: "R7.finalize", round: null, followUp: undefined }))
+      .not.toContain("objections");
   });
 
   it("limits build discipline to planning, implementation, and revision tasks", () => {

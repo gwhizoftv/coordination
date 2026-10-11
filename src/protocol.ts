@@ -180,6 +180,24 @@ export const consensusBallotArtifactSchema = z
   })
   .strict();
 
+/**
+ * Receipt for the follow-up issue a final-round objector filed. The coordinator
+ * fills every binding; the agent supplies only the issue URL it created.
+ */
+export const followUpReadyArtifactSchema = z
+  .object({
+    ...commonArtifactFields,
+    artifact: z.literal("follow-up-ready"),
+    actionId: actionIdSchema,
+    inputSetHash: digestSchema,
+    round: z.number().int().min(1),
+    revisionCommitSha: gitShaSchema,
+    followUpIssueUrl: z
+      .string()
+      .regex(/^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/[1-9][0-9]*$/, "expected a GitHub issue URL")
+  })
+  .strict();
+
 export const finalizationArtifactSchema = z
   .object({
     ...commonArtifactFields,
@@ -204,6 +222,7 @@ export const publishedArtifactSchema = z.discriminatedUnion("artifact", [
   comparisonBallotArtifactSchema,
   revisionReadyArtifactSchema,
   consensusBallotArtifactSchema,
+  followUpReadyArtifactSchema,
   finalizationArtifactSchema,
   planAmendmentRequestSchema,
   amendmentBallotArtifactSchema
@@ -217,6 +236,7 @@ export type ImplementationReadyArtifact = z.infer<typeof implementationReadyArti
 export type ComparisonBallotArtifact = z.infer<typeof comparisonBallotArtifactSchema>;
 export type RevisionReadyArtifact = z.infer<typeof revisionReadyArtifactSchema>;
 export type ConsensusBallotArtifact = z.infer<typeof consensusBallotArtifactSchema>;
+export type FollowUpReadyArtifact = z.infer<typeof followUpReadyArtifactSchema>;
 export type FinalizationArtifact = z.infer<typeof finalizationArtifactSchema>;
 export type PublishedArtifact = z.infer<typeof publishedArtifactSchema>;
 

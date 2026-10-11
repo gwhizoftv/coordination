@@ -7,7 +7,8 @@ import {
   formatFinalizationPullRequest,
   githubRepositoryFromOrigin,
   readGitHubIssueSnapshot,
-  renderGitHubIssueSnapshot
+  renderGitHubIssueSnapshot,
+  verifyFollowUpIssue
 } from "../src/githubIssue.js";
 
 const roots: string[] = [];
@@ -150,5 +151,79 @@ describe("GitHub issue snapshots", () => {
         draft: false
       }).title
     ).toBe("Issue 112: coordinated implementation");
+  });
+
+  it("states a revision-limit conclusion and its follow-up issues in the PR body", () => {
+    const { body } = formatFinalizationPullRequest({
+      issue: 177,
+      title: "Review limits",
+      finalSha: "a".repeat(40),
+      draft: true,
+      closeout: {
+        round: 3,
+        objections: [
+          { agent: "codex", disposition: "revise", followUp: { number: 180, url: "https://github.com/acme/app/issues/180" } },
+          { agent: "cursor", disposition: "escalate", followUp: null }
+        ]
+      }
+    });
+    expect(body.split("\n")).toEqual([
+      "Closes #177",
+      "",
+      `Draft PR for issue 177. Owner merges. Final pin: ${"a".repeat(40)}.`,
+      "",
+      "Concluded at the revision limit (round 3): this revision is finalized with objections on record, not with " +
+        "unanimous approval. Each objecting agent filed its remaining objections as a follow-up issue:",
+      "- codex (revise): https://github.com/acme/app/issues/180",
+      "- cursor (escalate): dropped before filing a follow-up issue"
+    ]);
+  });
+});
+
+describe("follow-up issue verification", () => {
+  const revision = "d".repeat(40);
+  const key = "coord-follow-up-0123456789abcdef";
+  const goodBody = `Remaining objections.\n\nFinal revision ${revision}\nFollow-up to #177 (https://github.com/acme/app/issues/177)\nFiling key: ${key}`;
+  const verify = (claimedUrl: string, body: string | null, failure?: string) =>
+    verifyFollowUpIssue({
+      origin: "https://github.com/acme/app.git",
+      parentIssue: 177,
+      claimedUrl,
+      revisionSha: revision,
+      filingKey: key,
+      cwd: "/runtime",
+      runner: async (argv) => {
+        const number = Number(argv[3]);
+        if (failure !== undefined) return { exitCode: 1, stdout: "", stderr: failure };
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({
+          number, title: "Follow-up", body, url: `https://github.com/acme/app/issues/${number}` }) };
+      }
+    });
+
+  it("accepts a different issue in the repository that links the concluding issue, revision, and key", async () => {
+    expect(await verify("https://github.com/acme/app/issues/180", goodBody)).toEqual({
+      status: "verified", number: 180, url: "https://github.com/acme/app/issues/180"
+    });
+    expect((await verify("https://github.com/acme/app/issues/180", goodBody.replace(/Follow-up to .*\n/, "See https://github.com/acme/app/issues/177\n"))).status)
+      .toBe("verified");
+  });
+
+  it.each([
+    ["the concluding issue itself", "https://github.com/acme/app/issues/177", goodBody],
+    ["another repository", "https://github.com/other/app/issues/180", goodBody],
+    ["no backlink", "https://github.com/acme/app/issues/180", goodBody.replace(/Follow-up to .*\n/, "")],
+    ["a longer issue number only", "https://github.com/acme/app/issues/180", goodBody.replace(/Follow-up to .*\n/, "See #1770\n")],
+    ["no final revision", "https://github.com/acme/app/issues/180", goodBody.replace(revision, "")],
+    ["no filing key", "https://github.com/acme/app/issues/180", goodBody.replace(key, "")],
+    ["a closing keyword", "https://github.com/acme/app/issues/180", `${goodBody}\nCloses #177`]
+  ])("rejects %s", async (_case, url, body) => {
+    expect((await verify(url, body)).status).toBe("rejected");
+  });
+
+  it("rejects a missing issue but reports a failed lookup as unavailable, never as a reason to file again", async () => {
+    expect(await verify("https://github.com/acme/app/issues/999", null,
+      "GraphQL: Could not resolve to an issue or pull request with the number of 999.")).toMatchObject({ status: "rejected" });
+    expect(await verify("https://github.com/acme/app/issues/180", null, "error connecting to api.github.com"))
+      .toMatchObject({ status: "unavailable" });
   });
 });

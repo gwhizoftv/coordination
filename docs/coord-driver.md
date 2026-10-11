@@ -89,7 +89,8 @@ Start from `config.example.json`:
 - `branch`: must contain `{issue}` and `{agent}`
 - `profile`: persisted default (`solo`, `reviewed`, or `consensus`) used by
   product-resolved start and `coord N`
-- `maxRevisionRounds`: fixed at 3 or less; no round 4 is possible
+- `maxRevisionRounds`: fixed at 3; no round 4 is possible (see
+  [Concluding at the revision limit](#concluding-at-the-revision-limit))
 - `prPolicy`: `coord-open-unmerged` (default; draft PR, owner merges),
   `coord-merged` (coord merges), or legacy `owner-only` (same as open-unmerged)
 - `digestPaths`: optional additional config-relative, confined source
@@ -533,6 +534,47 @@ active-roster order. Selected plans, the implementation owner/pin, and the
 authorized reviser are stored separately. Round 1 binds only the selected
 implementation, and later rounds bind only the preceding accepted revision.
 
+### Concluding at the revision limit
+
+Below the limit, a `revise` ballot starts the next revision round and an
+`escalate` ballot asks the owner (`retry`, `revise`, or `abandon`). The final
+round (3) never asks the owner and never starts round 4. Once every active
+round-3 ballot is accepted and its batch is published:
+
+- Unanimous `approve` derives the `unanimous-active-roster-v1` decision and
+  finalizes as before.
+- Any `revise` or `escalate` derives a `revision-limit-active-roster-v1`
+  decision on the same round-3 revision pin. It records each objector with its
+  own disposition; it is not an approval, and its identity can never alias a
+  unanimous decision.
+
+Each active objector then receives a follow-up task (`R6.follow-up`), only
+after the ballots are public. The objector files one new GitHub issue with all
+of its remaining objections; the coordinator never creates issues. The issue
+body must reference the concluding issue without a closing keyword, name the
+final revision SHA, and carry a stable filing key derived from the issue
+session, agent and final pin. The action tells the agent to search all issue
+states for that key first, so a reissued task reuses its own issue instead of
+filing a duplicate. The agent commits only a `follow-up-ready` receipt citing
+the issue URL. The coordinator reads that issue with `gh issue view` before
+accepting the receipt: a wrong repository, the concluding issue itself, or a
+missing backlink, revision or key is rejected with a correction; a failed
+lookup keeps the receipt and retries without reissuing the task.
+
+When every active objector's receipt is accepted, the authorized reviser
+finalizes the round-3 pin through the usual cleanup and final checks. Failed
+checks still block the PR. The PR keeps `Closes #N`, follows the configured
+PR policy, and lists every objection with its follow-up issue; `coord status`
+shows the same list, including objections still unfiled.
+
+Dropping a non-reviser after this conclusion keeps the plan, implementation
+and revision selections and rebuilds only the decision for the remaining
+roster from the already-published round-3 batch. Remaining objectors still owe
+their receipts; a dropped objector is reported as dropped, not as approving.
+An issue left on a round-3 `revision-limit` or `ballot-escalation` question by
+an earlier coordinator version retires that question automatically once its
+ballots are complete and published, without changing pauses or holds.
+
 When drops leave one active agent, future unresolved work degrades to the solo
 sequence. Completed historical gates and immutable product pins are retained.
 
@@ -630,7 +672,9 @@ After recovery, the runner continues from strict versioned state. State changes 
 exclusive lock plus a monotonic revision, so an in-flight fetch or check cannot
 overwrite a concurrent pause, drop, or abandon. `restart-action` reissues
 pending work without changing a gate. `answer` consumes one typed pending
-question, is idempotent for the same answer, and cannot create round 4.
+question (an escalation below the revision limit), is idempotent for the same
+answer, and cannot create round 4. A retired question can no longer be
+answered.
 `abandon` stops the workflow while retaining its audit state.
 
 ### Foreground interactive controls

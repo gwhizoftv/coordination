@@ -34,7 +34,10 @@ export type VerifyFinalizationParams = {
   /** Any path inside the Git worktree/object database containing both commits. */
   root: string;
   issue: number;
-  /** Exact implementation commit approved by consensus. */
+  /**
+   * The authorized finalization base: the revision every ballot approved, or
+   * the final allowed revision when the revision limit concluded with objections.
+   */
   consensusSha: string;
   /** Proposed merge-ready PR head. */
   finalSha: string;
@@ -79,7 +82,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       return rejected(
         params,
         "missing-consensus",
-        `Consensus-approved commit ${params.consensusSha} is not available. Fetch the reviewed branch without rewriting it, then rerun finalization verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
+        `Authorized final revision ${params.consensusSha} is not available. Fetch the reviewed branch without rewriting it, then rerun finalization verification.${inspected.details === "" ? "" : ` Git: ${inspected.details}`}`
       );
     }
 
@@ -95,7 +98,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       return rejected(
         params,
         "history-rewrite",
-        `Final commit ${params.finalSha} is not a descendant of consensus-approved commit ${params.consensusSha}. Invariant: finalization may only append cleanup after the reviewed implementation; it may not replace or rewrite that history.`
+        `Final commit ${params.finalSha} is not a descendant of the authorized final revision ${params.consensusSha}. Invariant: finalization may only append cleanup after the reviewed implementation; it may not replace or rewrite that history.`
       );
     }
 
@@ -119,7 +122,7 @@ export const verifyFinalization = (params: VerifyFinalizationParams): Finalizati
       "non-cleanup-change",
       `Finalization contains changes outside deletion-only cleanup for issue ${params.issue}: ${disallowed
         .map(displayChange)
-        .join("; ")}. Invariant: only deletions under .plans/issue-${params.issue}/**, .signals/issue-${params.issue}/**, and .code-reviews/issue-${params.issue}/** may follow consensus. Remove every addition, modification, rename/copy, implementation, dependency, test, automation, script, hook, documentation, root, or other-issue change before opening the merge-ready PR.`
+        .join("; ")}. Invariant: only deletions under .plans/issue-${params.issue}/**, .signals/issue-${params.issue}/**, and .code-reviews/issue-${params.issue}/** may follow the authorized final revision. Remove every addition, modification, rename/copy, implementation, dependency, test, automation, script, hook, documentation, root, or other-issue change before opening the merge-ready PR.`
     );
   }
 

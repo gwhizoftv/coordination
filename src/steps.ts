@@ -20,6 +20,7 @@ export type EvidenceId =
   | "comparison-response-accepted"
   | "revision-pinned"
   | "consensus-response-accepted"
+  | "follow-up-published"
   | "finalization-verified";
 
 export type WorkflowStepId =
@@ -33,6 +34,7 @@ export type WorkflowStepId =
   | "R5.compare-ballot"
   | "R6.revise"
   | "R6.ballot"
+  | "R6.follow-up"
   | "R7.finalize";
 
 export type GateId =
@@ -69,7 +71,7 @@ export type StepDefinition = {
   id: WorkflowStepId;
   gateId: GateId;
   evidenceId: EvidenceId;
-  participants: "all" | "implementer" | "reviser";
+  participants: "all" | "implementer" | "reviser" | "objectors";
   submissionMode: "git" | "response";
   /**
    * Git steps: repository-relative artifact path the agent must publish.
@@ -182,6 +184,17 @@ export const STEP_DEFINITIONS: Readonly<Record<WorkflowStepId, StepDefinition>> 
       `.code-reviews/issue-${issue}/consensus-ballot-${agent}-round-${round ?? 1}.json`,
     task: "Submit a consensus ballot judgment as a private response with your disposition and rationale. Do not commit or push."
   },
+  "R6.follow-up": {
+    id: "R6.follow-up",
+    gateId: "gate-6-consensus",
+    evidenceId: "follow-up-published",
+    participants: "objectors",
+    submissionMode: "git",
+    requiredPath: (issue, agent, round) =>
+      `.signals/issue-${issue}/follow-up-ready-${agent}-round-${round ?? 1}.json`,
+    task: "The final revision round has ended with your objection on record. The revision will be finalized and " +
+      "proposed as a pull request. File your remaining objections as one new GitHub issue, then publish a receipt citing it."
+  },
   "R7.finalize": {
     id: "R7.finalize",
     gateId: "gate-7-finalized",
@@ -216,6 +229,7 @@ const consensusSteps: readonly WorkflowStepId[] = [
   "R5.compare-ballot",
   "R6.revise",
   "R6.ballot",
+  "R6.follow-up",
   "R7.finalize"
 ];
 
@@ -240,11 +254,13 @@ export const participantsForStep = (
   stepId: WorkflowStepId,
   profile: WorkflowProfile,
   activeRoster: readonly string[],
-  reviser?: string
+  reviser?: string,
+  objectors: readonly string[] = []
 ): readonly string[] => {
   const step = STEP_DEFINITIONS[stepId];
   if (activeRoster.length === 0) return [];
   if (step.participants === "all") return activeRoster;
+  if (step.participants === "objectors") return activeRoster.filter((agent) => objectors.includes(agent));
   const designated = reviser !== undefined && activeRoster.includes(reviser) ? reviser : activeRoster[0] as string;
   if (step.participants === "reviser") return [designated];
   return profile === "consensus" ? activeRoster : [designated];
@@ -388,7 +404,12 @@ export type EvidenceObservation = {
   responseSha256?: string;
   rationale?: string;
   amendmentRequest?: PlanAmendmentRequest;
+  /** Follow-up receipts: the issue the objector cites; the run loop verifies it on GitHub before acceptance. */
+  followUpIssue?: FollowUpIssue;
 };
+
+/** A verified GitHub follow-up issue for objections that outlived the revision limit. */
+export type FollowUpIssue = { number: number; url: string };
 
 export type MachineDecision =
   | { type: "begin-amendment"; agent: string; submissionSha: string; request: PlanAmendmentRequest }
@@ -403,6 +424,7 @@ export type MachineDecision =
       approvedPaths?: readonly string[];
       choice?: string;
       checkResults?: readonly CheckResult[];
+      followUpIssue?: FollowUpIssue;
     }
   | {
       type: "accept-response";
@@ -419,6 +441,8 @@ export type MachineDecision =
   | { type: "derive-plan-selection" }
   | { type: "derive-implementation-selection" }
   | { type: "derive-consensus"; round: number }
+  /** A legacy question at the revision limit whose ballots now conclude the issue on their own. */
+  | { type: "retire-owner-question"; questionId: string; kind: "ballot-escalation" | "revision-limit"; round: number }
   | { type: "wait"; reason: string }
   | {
       type: "owner-action-required";

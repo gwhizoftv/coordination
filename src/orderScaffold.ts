@@ -14,6 +14,19 @@ export type ArtifactScaffoldContext = {
   approvedPaths: readonly string[];
   actionId?: string;
   scopeHash?: string;
+  /** Follow-up filing only: everything the objector needs to file and find its issue. */
+  followUp?: FollowUpFiling;
+  /** Finalization only: the base revision concluded at the revision limit with objections. */
+  concludedWithObjections?: boolean;
+};
+
+export type FollowUpFiling = {
+  /** `owner/name`, or null when the origin is not a GitHub repository. */
+  repository: string | null;
+  parentIssue: number;
+  revisionSha: string;
+  /** Stable across reissued actions so a retried filing finds the issue it already created. */
+  filingKey: string;
 };
 
 const PLACEHOLDER_SHA = "<40-lowercase-hex-commit-sha>";
@@ -78,6 +91,15 @@ export const artifactScaffoldValue = (ctx: ArtifactScaffoldContext): Record<stri
         actionId: ctx.actionId ?? "<action-uuid>",
         disposition: "approve",
         rationale: "<one sentence>"
+      };
+    case "R6.follow-up":
+      return {
+        ...withHash(ctx),
+        artifact: "follow-up-ready",
+        actionId: ctx.actionId ?? "<action-uuid>",
+        round: ctx.round ?? 1,
+        revisionCommitSha: ctx.followUp?.revisionSha ?? PLACEHOLDER_SHA,
+        followUpIssueUrl: "<https://github.com/OWNER/REPO/issues/NUMBER of the issue you filed>"
       };
     case "R7.finalize":
       return {
@@ -152,6 +174,38 @@ const markdownHeadingScaffold = (ctx: ArtifactScaffoldContext): string => {
   }
 };
 
+/** Issue-filing steps for a final-round objector; the coordinator verifies the issue on GitHub. */
+export const followUpFilingInstructions = (ctx: ArtifactScaffoldContext): string => {
+  const filing = ctx.followUp;
+  if (ctx.stepId !== "R6.follow-up" || filing === undefined) return "";
+  const repo = filing.repository === null ? "" : ` --repo ${filing.repository}`;
+  const where = filing.repository ?? "this project's GitHub repository";
+  const parentUrl = filing.repository === null
+    ? `#${filing.parentIssue}` : `https://github.com/${filing.repository}/issues/${filing.parentIssue}`;
+  return (
+    `\n\nFile your remaining objections as one new issue in ${where}. You file it; the coordinator only checks it.\n\n` +
+    "1. Search every issue state first, so a retried task reuses the issue you already filed:\n" +
+    `   gh issue list${repo} --state all --search "${filing.filingKey} in:body" --json number,url,body\n` +
+    `   If an issue whose body contains ${filing.filingKey} is listed, use its URL and skip step 2.\n` +
+    "2. Otherwise write the body to a file and create exactly one issue:\n" +
+    `   gh issue create${repo} --title "<descriptive title>" --body-file <file>\n` +
+    "   The body must contain: each remaining objection with its concrete failure and the expected behavior; " +
+    `the final revision ${filing.revisionSha}; the line \`Follow-up to #${filing.parentIssue} (${parentUrl})\` ` +
+    "(a plain reference, not a closing keyword); and the line " +
+    `\`Filing key: ${filing.filingKey}\`. If creation reports an error, search again before creating another.\n` +
+    "3. Put that issue's URL in the receipt below, commit only the receipt, and push.\n\n" +
+    `The coordinator reads the issue on GitHub before accepting the receipt: it must be a different issue in ${where} ` +
+    `whose body names #${filing.parentIssue}, the final revision, and the filing key.`
+  );
+};
+
+/** What the finalization base is, stated for the decision that authorized it. */
+const finalizationBaseNotice = (ctx: ArtifactScaffoldContext): string =>
+  ctx.stepId === "R7.finalize" && ctx.concludedWithObjections === true
+    ? "\n\nThe bound consensus commit is the final allowed revision. It concluded with objections on record; " +
+      "they are filed as follow-up issues, not addressed here. Finalize it unchanged apart from the permitted cleanup."
+    : "";
+
 export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => {
   const markdown = markdownHeadingScaffold(ctx);
   if (markdown !== "") return markdown;
@@ -173,5 +227,5 @@ export const renderArtifactScaffold = (ctx: ArtifactScaffoldContext): string => 
         scopeHash: ctx.scopeHash, explanation: "<discovered omission>",
         additionalPaths: [{ path: "<exact-product-file-path>", reason: "<why the original plan needs this file>" }] }, null, 2) + "\n```"
     : "";
-  return preamble + "```json\n" + `${json}\n` + "```" + request;
+  return followUpFilingInstructions(ctx) + finalizationBaseNotice(ctx) + preamble + "```json\n" + `${json}\n` + "```" + request;
 };

@@ -3,6 +3,7 @@ import { sha256 } from "./hash.js";
 import type { FetchResult } from "./mirror.js";
 import {
   finalizationArtifactSchema,
+  followUpReadyArtifactSchema,
   implementationReadyArtifactSchema,
   participationReadyArtifactSchema,
   planAmendmentRequestSchema,
@@ -375,6 +376,25 @@ export const evaluateEvidence = async (
     }
     return errors.length === 0
       ? satisfied(order, submissionSha, { productPin: parsed.value.revisedBranchHead })
+      : rejected(order, submissionSha, errors);
+  }
+
+  if (order.evidenceId === "follow-up-published") {
+    const parsed = parseJsonWithSchema(blob, followUpReadyArtifactSchema);
+    if (!parsed.ok) return rejected(order, submissionSha, [`invalid follow-up issue receipt: ${parsed.error}`]);
+    const receipt = parsed.value;
+    const errors = [...commonErrors(receipt, order), ...inputHashErrors(receipt.inputSetHash, order)];
+    if (receipt.actionId !== order.actionId) errors.push("follow-up receipt actionId does not match the current action");
+    if (receipt.round !== order.round) errors.push(`follow-up receipt round must be ${order.round ?? 1}`);
+    const revision = order.inputs.filter((input) => input.kind === "revision");
+    if (revision.length !== 1) errors.push("this action is not bound to exactly one final revision");
+    else if (receipt.revisionCommitSha !== revision[0]!.commitSha) {
+      errors.push("follow-up receipt revisionCommitSha is not the bound final revision");
+    }
+    // The issue itself is read from GitHub by the coordinator before acceptance.
+    const number = Number(/\/issues\/([1-9][0-9]*)$/.exec(receipt.followUpIssueUrl)?.[1]);
+    return errors.length === 0
+      ? { ...satisfied(order, submissionSha), followUpIssue: { number, url: receipt.followUpIssueUrl } }
       : rejected(order, submissionSha, errors);
   }
 
